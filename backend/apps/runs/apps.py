@@ -1,0 +1,8 @@
+from django.apps import AppConfig
+
+
+class RunsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'apps.runs'
+    label = 'runs'
+    verbose_name = '执行记录'
