@@ -1,6 +1,5 @@
 import subprocess
 import os
-import signal
 import time
 import json
 import requests
@@ -11,7 +10,6 @@ from urllib.parse import urlparse
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.admin.models import LogEntry, ADDITION, CHANGE, DELETION
-from django.contrib.contenttypes.models import ContentType
 from django.core.files.base import ContentFile
 from django.conf import settings
 from django.http import HttpResponse
@@ -39,22 +37,8 @@ from .engine import TestEngine, validate_outbound_http_url
 from .locust_codegen import generate_locust_code
 from .tasks import run_test_case_task, run_test_suite_task, run_perf_test_task
 from .crypto_utils import decrypt_json
-
-def _audit(user, obj, action_flag, message):
-    try:
-        if not user or not getattr(user, 'is_authenticated', False):
-            return
-        ct = ContentType.objects.get_for_model(obj.__class__)
-        LogEntry.objects.log_action(
-            user_id=user.id,
-            content_type_id=ct.pk,
-            object_id=obj.pk,
-            object_repr=str(obj)[:200],
-            action_flag=action_flag,
-            change_message=str(message or '')[:2000],
-        )
-    except Exception:
-        return
+from .audit_utils import audit_log
+from .task_tracker import bind_task_owner, get_task_owner
 
 class EnvConfigViewSet(viewsets.ModelViewSet):
     queryset = EnvConfig.objects.select_related('project', 'project__owner').all()
@@ -86,14 +70,14 @@ class EnvConfigViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         obj = serializer.save()
-        _audit(self.request.user, obj, ADDITION, f'创建环境: {obj.name}')
+        audit_log(self.request.user, obj, ADDITION, f'创建环境: {obj.name}')
 
     def perform_update(self, serializer):
         obj = serializer.save()
-        _audit(self.request.user, obj, CHANGE, f'更新环境: {obj.name}')
+        audit_log(self.request.user, obj, CHANGE, f'更新环境: {obj.name}')
 
     def perform_destroy(self, instance):
-        _audit(self.request.user, instance, DELETION, f'删除环境: {instance.name}')
+        audit_log(self.request.user, instance, DELETION, f'删除环境: {instance.name}')
         instance.delete()
 
 class CrontabScheduleViewSet(viewsets.ModelViewSet):
@@ -138,10 +122,10 @@ class PeriodicTaskViewSet(
 
     def perform_update(self, serializer):
         obj = serializer.save()
-        _audit(self.request.user, obj, CHANGE, f'更新定时任务: {obj.name}')
+        audit_log(self.request.user, obj, CHANGE, f'更新定时任务: {obj.name}')
 
     def perform_destroy(self, instance):
-        _audit(self.request.user, instance, DELETION, f'删除定时任务: {instance.name}')
+        audit_log(self.request.user, instance, DELETION, f'删除定时任务: {instance.name}')
         instance.delete()
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -205,14 +189,14 @@ class ProjectViewSet(viewsets.ModelViewSet):
     
     def perform_create(self, serializer):
         obj = serializer.save(owner=self.request.user)
-        _audit(self.request.user, obj, ADDITION, f'创建项目: {obj.name}')
+        audit_log(self.request.user, obj, ADDITION, f'创建项目: {obj.name}')
 
     def perform_update(self, serializer):
         obj = serializer.save()
-        _audit(self.request.user, obj, CHANGE, f'更新项目: {obj.name}')
+        audit_log(self.request.user, obj, CHANGE, f'更新项目: {obj.name}')
 
     def perform_destroy(self, instance):
-        _audit(self.request.user, instance, DELETION, f'删除项目: {instance.name}')
+        audit_log(self.request.user, instance, DELETION, f'删除项目: {instance.name}')
         instance.delete()
 
 class TestCaseViewSet(viewsets.ModelViewSet):
@@ -267,15 +251,15 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         case = serializer.save()
         self.create_version(case, self.request.user)
-        _audit(self.request.user, case, ADDITION, f'创建用例: {case.title}')
+        audit_log(self.request.user, case, ADDITION, f'创建用例: {case.title}')
     
     def perform_update(self, serializer):
         case = serializer.save()
         self.create_version(case, self.request.user)
-        _audit(self.request.user, case, CHANGE, f'更新用例: {case.title}')
+        audit_log(self.request.user, case, CHANGE, f'更新用例: {case.title}')
 
     def perform_destroy(self, instance):
-        _audit(self.request.user, instance, DELETION, f'删除用例: {instance.title}')
+        audit_log(self.request.user, instance, DELETION, f'删除用例: {instance.title}')
         instance.delete()
     
     @action(detail=True, methods=['get'])
@@ -305,7 +289,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 setattr(case, f, snap.get(f))
         case.save()
         self.create_version(case, request.user)
-        _audit(request.user, case, CHANGE, f'回滚用例版本: {case.title}')
+        audit_log(request.user, case, CHANGE, f'回滚用例版本: {case.title}')
         return Response({'detail': '已回滚并生成新版本'})
 
     @action(detail=True, methods=['post'])
@@ -326,6 +310,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         
         # 异步执行任务
         task = run_test_case_task.delay(case.id, env_id, extra_vars)
+        bind_task_owner(task.id, request.user.id)
         
         return Response({
             'status': 'pending',
@@ -402,7 +387,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             enabled=enabled,
             description=description,
         )
-        _audit(request.user, pt, ADDITION, f'创建用例定时任务: case#{case.id}')
+        audit_log(request.user, pt, ADDITION, f'创建用例定时任务: case#{case.id}')
         return Response(PeriodicTaskSerializer(pt).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'])
@@ -506,7 +491,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         perf_record.save(update_fields=['csv_prefix'])
 
         # 异步执行压测任务
-        run_perf_test_task.delay(perf_record.id)
+        task = run_perf_test_task.delay(perf_record.id)
+        bind_task_owner(task.id, request.user.id)
         
         return Response({
             'message': '性能测试已进入后台队列', 
@@ -629,14 +615,14 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         obj = serializer.save()
-        _audit(self.request.user, obj, ADDITION, f'创建套件: {obj.name}')
+        audit_log(self.request.user, obj, ADDITION, f'创建套件: {obj.name}')
 
     def perform_update(self, serializer):
         obj = serializer.save()
-        _audit(self.request.user, obj, CHANGE, f'更新套件: {obj.name}')
+        audit_log(self.request.user, obj, CHANGE, f'更新套件: {obj.name}')
 
     def perform_destroy(self, instance):
-        _audit(self.request.user, instance, DELETION, f'删除套件: {instance.name}')
+        audit_log(self.request.user, instance, DELETION, f'删除套件: {instance.name}')
         instance.delete()
 
     def build_suite_locust_code(self, suite, base_url=None):
@@ -722,6 +708,7 @@ class {safe_name}(HttpUser):
         
         # 异步执行任务
         task = run_test_suite_task.delay(suite.id, env_id, extra_vars, stop_on_failure)
+        bind_task_owner(task.id, request.user.id)
         
         return Response({
             'status': 'pending',
@@ -799,7 +786,7 @@ class {safe_name}(HttpUser):
             enabled=bool(enabled),
             description=description,
         )
-        _audit(request.user, pt, ADDITION, f'创建套件定时任务: suite#{suite.id}')
+        audit_log(request.user, pt, ADDITION, f'创建套件定时任务: suite#{suite.id}')
         return Response(PeriodicTaskSerializer(pt).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'])
@@ -1157,8 +1144,13 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return resp
 
 @api_view(['GET'])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def task_status(request, task_id):
+    owner_id = get_task_owner(task_id)
+    if owner_id is None:
+        return Response({'detail': '任务不存在或已过期'}, status=status.HTTP_404_NOT_FOUND)
+    if int(owner_id) != int(request.user.id):
+        return Response({'detail': '无权限查看该任务'}, status=status.HTTP_403_FORBIDDEN)
     result = AsyncResult(task_id)
     return Response({
         'task_id': task_id,
@@ -1194,7 +1186,3 @@ class RegisterView(APIView):
             return Response({'detail': list(getattr(e, 'messages', []) or ['密码不符合安全要求'])}, status=status.HTTP_400_BAD_REQUEST)
         user = User.objects.create_user(username=username, password=password)
         return Response({'id': user.id, 'username': user.username}, status=status.HTTP_201_CREATED)
-
-def health_check(request):
-    from django.http import JsonResponse
-    return JsonResponse({'status': 'ok', 'service': 'AutoTest Backend v1.0'})

@@ -131,8 +131,14 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-# Celery 任务调度配置
-CELERY_ALWAYS_EAGER = os.getenv('CELERY_ALWAYS_EAGER', 'false').lower() in {'1', 'true', 'yes', 'on'}
+# Celery：未设置 CELERY_ALWAYS_EAGER 时，DEBUG 下默认同步执行（本地不配 Redis 也可跑通 .delay 入口）；
+# Docker / 生产请显式设置 CELERY_ALWAYS_EAGER=false 并使用 worker。
+_celery_eager_raw = os.getenv('CELERY_ALWAYS_EAGER')
+if _celery_eager_raw is not None:
+    CELERY_ALWAYS_EAGER = _celery_eager_raw.lower() in {'1', 'true', 'yes', 'on'}
+else:
+    CELERY_ALWAYS_EAGER = bool(DEBUG)
+
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/1')
 if not DEBUG:

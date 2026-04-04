@@ -9,7 +9,8 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from .models import Project, EnvConfig, TestCase as DbTestCase, TestSuite as DbTestSuite, PerfRecord
 from .engine import TestEngine, validate_outbound_http_url
 from .tasks import run_test_case_task, run_test_suite_task
-from .views import PerfRecordViewSet, health_check, task_status, RegisterView
+from .health import health_check
+from .views import PerfRecordViewSet, task_status, RegisterView
 from .locust_codegen import generate_locust_code
 from .utils import Notifier
 from .crypto_utils import decrypt_json, encrypt_str, decrypt_str, merge_masked, ENC_PREFIX, MASK
@@ -468,23 +469,40 @@ class TestPublicAndAuthEndpoints(DjangoTestCase):
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.content.decode('utf-8'))
         self.assertEqual(data.get('status'), 'ok')
+        self.assertEqual(data.get('database'), 'ok')
 
     def test_task_status_returns_shape(self):
         from django.test import RequestFactory
-        from unittest.mock import MagicMock
+        from django.contrib.auth import get_user_model
 
+        user = get_user_model().objects.create_user('tasku1', 'StrongPass2026!')
         rf = RequestFactory()
-        with patch('api.views.AsyncResult') as AR:
+        req = rf.get('/api/task-status/x/')
+        force_authenticate(req, user=user)
+        with patch('api.views.get_task_owner', return_value=user.id), patch('api.views.AsyncResult') as AR:
             inst = MagicMock()
             inst.status = 'PENDING'
             inst.ready.return_value = False
             inst.result = None
             AR.return_value = inst
-            resp = task_status(rf.get('/api/task-status/x/'), 'tid-1')
+            resp = task_status(req, 'tid-1')
         self.assertEqual(resp.status_code, 200)
         body = resp.data
         self.assertEqual(body.get('task_id'), 'tid-1')
         self.assertEqual(body.get('status'), 'PENDING')
+
+    def test_task_status_rejects_other_users_task(self):
+        from django.test import RequestFactory
+        from django.contrib.auth import get_user_model
+
+        owner = get_user_model().objects.create_user('tasku2', 'StrongPass2026!')
+        user = get_user_model().objects.create_user('tasku3', 'StrongPass2026!')
+        rf = RequestFactory()
+        req = rf.get('/api/task-status/x/')
+        force_authenticate(req, user=user)
+        with patch('api.views.get_task_owner', return_value=owner.id):
+            resp = task_status(req, 'tid-2')
+        self.assertEqual(resp.status_code, 403)
 
     def test_register_rejects_short_password(self):
         from django.test import RequestFactory
@@ -536,6 +554,18 @@ class TestLocustCodegen(TestCase):
         self.assertIn('from locust import HttpUser', code)
         self.assertIn('self.client.request("GET", "/ping"', code)
         self.assertIn('example.com', code)
+
+
+class TestAuditUtils(DjangoTestCase):
+    def test_audit_log_creates_log_entry(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.admin.models import LogEntry, ADDITION
+        from .audit_utils import audit_log
+
+        user = get_user_model().objects.create_user('aul', 'StrongPass2026!')
+        project = Project.objects.create(name='ap', owner=user)
+        audit_log(user, project, ADDITION, '测试审计')
+        self.assertTrue(LogEntry.objects.filter(user=user, object_id=str(project.pk)).exists())
 
 
 class TestCryptoUtils(TestCase):

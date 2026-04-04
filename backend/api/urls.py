@@ -2,11 +2,12 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework.schemas import get_schema_view
 from rest_framework.permissions import AllowAny
+from .health import health_check
 from .views import (
-    ProjectViewSet, TestCaseViewSet, TestSuiteViewSet, 
-    TestRecordViewSet, SuiteRunViewSet, EnvConfigViewSet, 
+    ProjectViewSet, TestCaseViewSet, TestSuiteViewSet,
+    TestRecordViewSet, SuiteRunViewSet, EnvConfigViewSet,
     CrontabScheduleViewSet, PeriodicTaskViewSet, PerfRecordViewSet, AuditLogViewSet,
-    health_check, task_status, RegisterView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView
+    task_status, RegisterView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView,
 )
 
 router = DefaultRouter()
