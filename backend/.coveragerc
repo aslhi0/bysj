@@ -1,0 +1,13 @@
+[run]
+source = api, core
+omit =
+    */migrations/*
+    */wsgi.py
+    */asgi.py
+    */urls.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError

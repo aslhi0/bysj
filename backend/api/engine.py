@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 import requests
 import json
@@ -6,6 +8,7 @@ import os
 import re
 import ipaddress
 import socket
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urljoin
 from jsonschema import validate
 from faker import Faker
@@ -60,7 +63,12 @@ def validate_outbound_http_url(url, *, allowed_hosts=None):
 
 class TestEngine:
     __test__ = False
-    def __init__(self, variables=None, db_config=None):
+
+    def __init__(
+        self,
+        variables: Optional[Dict[str, Any]] = None,
+        db_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.variables = variables or {}
         if isinstance(self.variables, dict):
             if 'base_url' in self.variables and 'base' not in self.variables:
@@ -99,13 +107,16 @@ class TestEngine:
                 return default
         return default
 
-    def get_by_path(self, obj, path):
+    def get_by_path(self, obj, path, max_depth=20):
         if obj is None:
             return None
         if not path:
             return obj
+        parts = str(path).split('.')
+        if len(parts) > int(max_depth):
+            raise ValueError('path 深度过大')
         cur = obj
-        for part in str(path).split('.'):
+        for part in parts:
             if cur is None:
                 return None
             if isinstance(cur, dict):
@@ -134,7 +145,8 @@ class TestEngine:
             except Exception as e:
                 self.add_log(f"截图失败: {str(e)}")
 
-    def render_string(self, text):
+    def render_string(self, text: Any) -> Any:
+        """将 {{var}} / [[var]] 及常见 faker 占位符替换为变量或随机值。"""
         if not isinstance(text, str):
             return text
         
@@ -161,7 +173,8 @@ class TestEngine:
             
         return text
 
-    def run_step(self, step):
+    def run_step(self, step: Dict[str, Any]) -> bool:
+        """按步骤 type 分发到 HTTP / UI 等执行器并记录步骤结果。"""
         step_type = step.get('type')
         start_time = time.time()
         success = False
@@ -237,10 +250,19 @@ class TestEngine:
                             val = self.get_by_path(resp_json, path)
                             self.variables[var_name] = val
                             self.add_log(f"提取变量: {var_name} = {val}")
-                except Exception as e:
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError) as e:
                     self.add_log(f"变量提取失败: {str(e)}")
             
             return success
+        except requests.Timeout:
+            self.add_log("请求异常: Timeout")
+            return False
+        except requests.ConnectionError:
+            self.add_log("请求异常: ConnectionError")
+            return False
+        except requests.RequestException as e:
+            self.add_log(f"请求异常: {str(e)}")
+            return False
         except Exception as e:
             self.add_log(f"请求异常: {str(e)}")
             return False
@@ -272,13 +294,21 @@ class TestEngine:
             
             res = False
             if operator == 'eq':
-                res = actual == expected
+                res = str(actual) == str(expected)
             elif operator == 'contains':
-                res = expected in actual
+                res = str(expected) in str(actual)
             elif operator == 'gt':
-                res = float(actual) > float(expected)
+                try:
+                    res = float(actual) > float(expected)
+                except (ValueError, TypeError):
+                    self.add_log(f"断言异常: 无法将 {actual} 转换为数字")
+                    res = False
             elif operator == 'lt':
-                res = float(actual) < float(expected)
+                try:
+                    res = float(actual) < float(expected)
+                except (ValueError, TypeError):
+                    self.add_log(f"断言异常: 无法将 {actual} 转换为数字")
+                    res = False
             
             self.add_log(f"断言 [{source} {operator} {expected}]: {'通过' if res else '失败'} (实际值: {actual})")
             return res
@@ -370,10 +400,19 @@ class TestEngine:
                 options.add_argument('--headless')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
+            try:
+                options.set_capability('pageLoadStrategy', 'eager')
+            except Exception:
+                pass
             win_size = browser_cfg.get('window_size') or browser_cfg.get('windowSize') or step.get('window_size')
             if isinstance(win_size, str) and win_size.strip():
                 options.add_argument(f'--window-size={win_size.strip()}')
             self.driver = webdriver.Chrome(options=options)
+            try:
+                self.driver.set_page_load_timeout(30)
+                self.driver.set_script_timeout(30)
+            except Exception:
+                pass
 
         self.add_log(f"UI 动作: {action} {url or selector or ''}")
         try:

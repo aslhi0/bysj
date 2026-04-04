@@ -432,8 +432,67 @@ function showRecordLog(row) {
   logDialogVisible.value = true
 }
 
-function openRecordReport(row) {
-  window.open(`/api/records/${row.id}/report/`, '_blank')
+async function openRecordReport(row) {
+  try {
+    const res = await apiFetch(`/api/records/${row.id}/report/`)
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      ElMessage.error(err.detail || '无法加载报告')
+      return
+    }
+    const html = await res.text()
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const w = window.open(url, '_blank')
+    if (!w) {
+      URL.revokeObjectURL(url)
+      ElMessage.warning('浏览器拦截了弹出窗口，请使用「下载 HTML」')
+      return
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 120000)
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
+}
+
+async function downloadRecordReportHtml(row) {
+  try {
+    const res = await apiFetch(`/api/records/${row.id}/report/?download=1`)
+    if (!res.ok) {
+      ElMessage.error('下载失败')
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `record_${row.id}.html`
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('已下载 HTML 报告')
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
+}
+
+async function downloadRecordReportJson(row) {
+  try {
+    const res = await apiFetch(`/api/records/${row.id}/report/?format=json&download=1`)
+    if (!res.ok) {
+      ElMessage.error('导出失败')
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `record_${row.id}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('已导出 JSON')
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
 }
 
 function showScreenshot(url) {
@@ -604,10 +663,12 @@ async function pollTaskStatus(taskId, title) {
             </template>
           </el-table-column>
           <el-table-column prop="elapsed_time" label="耗时(s)" width="90" />
-          <el-table-column label="详情" min-width="120">
+          <el-table-column label="详情" min-width="260">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="showRecordLog(row)">日志</el-button>
               <el-button type="success" link size="small" @click="openRecordReport(row)">报告</el-button>
+              <el-button type="info" link size="small" @click="downloadRecordReportHtml(row)">HTML</el-button>
+              <el-button type="warning" link size="small" @click="downloadRecordReportJson(row)">JSON</el-button>
               <el-button v-if="row.screenshot" type="success" link size="small" @click="showScreenshot(row.screenshot)">截图</el-button>
             </template>
           </el-table-column>

@@ -5,7 +5,7 @@ from rest_framework.permissions import AllowAny
 from .views import (
     ProjectViewSet, TestCaseViewSet, TestSuiteViewSet, 
     TestRecordViewSet, SuiteRunViewSet, EnvConfigViewSet, 
-    CrontabScheduleViewSet, PeriodicTaskViewSet, PerfRecordViewSet,
+    CrontabScheduleViewSet, PeriodicTaskViewSet, PerfRecordViewSet, AuditLogViewSet,
     health_check, task_status, RegisterView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView
 )
 
@@ -19,6 +19,7 @@ router.register(r'cases', TestCaseViewSet)
 router.register(r'suites', TestSuiteViewSet)
 router.register(r'records', TestRecordViewSet)
 router.register(r'suite-runs', SuiteRunViewSet)
+router.register(r'audit-logs', AuditLogViewSet)
 
 schema_view = get_schema_view(title='AutoTest API', version='1.0.0', permission_classes=[AllowAny])
 

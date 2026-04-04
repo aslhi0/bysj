@@ -45,16 +45,13 @@ async function refreshAccessToken() {
 
 export async function apiFetch(input, init = {}) {
   const token = getAccessToken()
-  const apiKey = import.meta.env.VITE_API_KEY
   const headers = new Headers(init.headers || {})
   if (token) headers.set('Authorization', `Bearer ${token}`)
-  if (apiKey) headers.set('X-API-Key', apiKey)
   const res = await fetch(input, { ...init, headers })
   if (res.status !== 401) return res
   const newAccess = await refreshAccessToken()
   if (!newAccess) return res
   const headers2 = new Headers(init.headers || {})
   headers2.set('Authorization', `Bearer ${newAccess}`)
-  if (apiKey) headers2.set('X-API-Key', apiKey)
   return fetch(input, { ...init, headers: headers2 })
 }

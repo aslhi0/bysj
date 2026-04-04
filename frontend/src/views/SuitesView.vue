@@ -358,6 +358,26 @@ function exportHistoryJson() {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+async function downloadSuiteRunServerExport(row) {
+  try {
+    const res = await apiFetch(`/api/suite-runs/${row.id}/export/?download=1`)
+    if (!res.ok) {
+      ElMessage.error('服务端导出失败')
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `suite_run_${row.id}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('已下载该批次完整 JSON')
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
+}
 </script>
 
 <template>
@@ -510,6 +530,11 @@ function exportHistoryJson() {
           <el-table-column label="遇败即停" width="100">
             <template #default="{ row }">
               {{ row.stop_on_failure ? '是' : '否' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="导出" width="100" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="downloadSuiteRunServerExport(row)">服务端</el-button>
             </template>
           </el-table-column>
         </el-table>

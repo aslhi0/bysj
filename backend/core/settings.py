@@ -86,6 +86,13 @@ TIME_ZONE = 'Asia/Shanghai'
 USE_I18N = True
 USE_TZ = True
 
+SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = 'Lax'
+
 STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -128,6 +135,14 @@ SIMPLE_JWT = {
 CELERY_ALWAYS_EAGER = os.getenv('CELERY_ALWAYS_EAGER', 'false').lower() in {'1', 'true', 'yes', 'on'}
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/1')
+if not DEBUG:
+    missing = []
+    if os.getenv('CELERY_BROKER_URL') is None:
+        missing.append('CELERY_BROKER_URL')
+    if os.getenv('CELERY_RESULT_BACKEND') is None:
+        missing.append('CELERY_RESULT_BACKEND')
+    if missing:
+        raise RuntimeError('生产环境必须设置: ' + ', '.join(missing))
 if CELERY_ALWAYS_EAGER:
     CELERY_BROKER_URL = 'memory://'
     CELERY_RESULT_BACKEND = 'cache+memory://'
@@ -150,3 +165,30 @@ DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+LOG_LEVEL = os.getenv('DJANGO_LOG_LEVEL', 'DEBUG' if DEBUG else 'INFO')
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '{levelname} {asctime} {name} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': LOG_LEVEL,
+    },
+    'loggers': {
+        'django.request': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+        'api': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
+        'celery': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
+    },
+}

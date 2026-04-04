@@ -3,6 +3,7 @@ import subprocess
 import os
 import sys
 import re
+import logging
 from celery import shared_task
 from django.core.files.base import ContentFile
 from django.conf import settings
@@ -10,6 +11,9 @@ from .models import TestCase, TestSuite, TestRecord, SuiteRun, EnvConfig, PerfRe
 from .engine import TestEngine
 from .utils import Notifier
 from .crypto_utils import decrypt_json
+
+logger = logging.getLogger(__name__)
+
 
 @shared_task
 def run_test_case_task(case_id, env_id=None, extra_vars=None):
@@ -103,6 +107,12 @@ def run_test_case_task(case_id, env_id=None, extra_vars=None):
     if record is None:
         return {'status': 'error', 'message': error_message or '无法创建执行记录'}
 
+    logger.info(
+        'run_test_case_task finished case_id=%s record_id=%s status=%s',
+        case_id,
+        record.id,
+        record.status,
+    )
     return {
         'status': record.status,
         'record_id': record.id,
@@ -227,6 +237,12 @@ def run_test_suite_task(suite_id, env_id=None, extra_vars=None, stop_on_failure=
         suite_run.results = results
         suite_run.save()
 
+        logger.info(
+            'run_test_suite_task finished suite_id=%s suite_run_id=%s summary=%s',
+            suite_id,
+            suite_run.id,
+            suite_run.summary,
+        )
         return {'suite_run_id': suite_run.id, 'summary': suite_run.summary}
     except Exception as e:
         msg = str(e)
@@ -274,7 +290,12 @@ def run_perf_test_task(perf_record_id):
             '--csv', os.path.join(perf_dir, csv_prefix),
         ]
 
-        subprocess.run(cmd, cwd=perf_dir, timeout=seconds + 30, check=False)
+        try:
+            subprocess.run(cmd, cwd=perf_dir, timeout=seconds + 30, check=False)
+        except subprocess.TimeoutExpired:
+            record.status = 'timeout'
+            record.save(update_fields=['status'])
+            return {'status': 'timeout', 'perf_record_id': perf_record_id}
         
         record.status = 'finished'
         record.save()
@@ -285,11 +306,16 @@ def run_perf_test_task(perf_record_id):
         except Exception:
             pass
         
+        logger.info('run_perf_test_task finished perf_record_id=%s', perf_record_id)
         return {'status': 'finished', 'perf_record_id': perf_record_id}
     except Exception as e:
+        logger.exception('run_perf_test_task failed perf_record_id=%s', perf_record_id)
         try:
             record = PerfRecord.objects.get(id=perf_record_id)
             record.status = 'error'
-            record.save()
-        except: pass
+            record.save(update_fields=['status'])
+        except PerfRecord.DoesNotExist:
+            pass
+        except Exception:
+            logger.exception('failed to mark PerfRecord error state')
         return {'status': 'error', 'message': str(e)}

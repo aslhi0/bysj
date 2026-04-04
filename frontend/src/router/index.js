@@ -42,6 +42,11 @@ const routes = [
     name: 'perf',
     component: () => import('../views/PerfView.vue'),
   },
+  {
+    path: '/audit',
+    name: 'audit',
+    component: () => import('../views/AuditLogsView.vue'),
+  },
 ]
 
 const router = createRouter({

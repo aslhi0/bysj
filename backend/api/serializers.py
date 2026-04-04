@@ -1,7 +1,44 @@
 from rest_framework import serializers
 from django_celery_beat.models import PeriodicTask, CrontabSchedule
+from django.contrib.admin.models import LogEntry
 from .models import Project, TestCase, TestSuite, TestRecord, SuiteRun, EnvConfig, PerfRecord, TestCaseVersion
 from .crypto_utils import encrypt_json, decrypt_json, mask_json, merge_masked
+
+def _validate_json_limits(value, *, max_depth=8, max_keys=200, max_list=500, max_str=20000, max_nodes=5000):
+    nodes = 0
+
+    def walk(v, depth):
+        nonlocal nodes
+        nodes += 1
+        if nodes > max_nodes:
+            raise serializers.ValidationError('JSON 内容过大')
+        if depth > max_depth:
+            raise serializers.ValidationError('JSON 嵌套过深')
+        if v is None or isinstance(v, (bool, int, float)):
+            return
+        if isinstance(v, str):
+            if len(v) > max_str:
+                raise serializers.ValidationError('JSON 字符串过长')
+            return
+        if isinstance(v, list):
+            if len(v) > max_list:
+                raise serializers.ValidationError('JSON 数组过长')
+            for it in v:
+                walk(it, depth + 1)
+            return
+        if isinstance(v, dict):
+            if len(v) > max_keys:
+                raise serializers.ValidationError('JSON 键数量过多')
+            for k, it in v.items():
+                if not isinstance(k, str):
+                    raise serializers.ValidationError('JSON 键必须为字符串')
+                if len(k) > 100:
+                    raise serializers.ValidationError('JSON 键名过长')
+                walk(it, depth + 1)
+            return
+        raise serializers.ValidationError('JSON 类型不支持')
+
+    walk(value, 1)
 
 class CrontabScheduleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -61,6 +98,7 @@ class EnvConfigSerializer(serializers.ModelSerializer):
         if value is None:
             return {}
         if isinstance(value, dict):
+            _validate_json_limits(value, max_depth=6, max_keys=100, max_list=200, max_str=20000, max_nodes=2000)
             return value
         raise serializers.ValidationError('db_config 必须是 JSON 对象')
     
@@ -68,6 +106,7 @@ class EnvConfigSerializer(serializers.ModelSerializer):
         if value is None:
             return {}
         if isinstance(value, dict):
+            _validate_json_limits(value, max_depth=8, max_keys=200, max_list=500, max_str=50000, max_nodes=5000)
             return value
         raise serializers.ValidationError('variables 必须是 JSON 对象')
     
@@ -109,8 +148,16 @@ class ProjectSerializer(serializers.ModelSerializer):
     owner_username = serializers.CharField(source='owner.username', read_only=True)
     class Meta:
         model = Project
-        fields = '__all__'
-        read_only_fields = ['owner', 'created_at']
+        fields = [
+            'id',
+            'owner',
+            'owner_username',
+            'name',
+            'description',
+            'webhook_url',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'owner', 'owner_username', 'created_at']
 
 class TestCaseSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
@@ -189,6 +236,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
         if value is None:
             return {}
         if isinstance(value, dict):
+            _validate_json_limits(value, max_depth=8, max_keys=200, max_list=500, max_str=50000, max_nodes=5000)
             return value
         raise serializers.ValidationError('variables 必须是 JSON 对象')
 
@@ -221,6 +269,7 @@ class TestSuiteSerializer(serializers.ModelSerializer):
         if value is None:
             return {}
         if isinstance(value, dict):
+            _validate_json_limits(value, max_depth=8, max_keys=200, max_list=500, max_str=50000, max_nodes=5000)
             return value
         raise serializers.ValidationError('variables 必须是 JSON 对象')
     
@@ -305,3 +354,37 @@ class TestCaseVersionSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = ['id', 'created_by_username', 'created_at']
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+    content_type = serializers.SerializerMethodField()
+    action = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LogEntry
+        fields = [
+            'id',
+            'action_time',
+            'user',
+            'username',
+            'content_type',
+            'object_id',
+            'object_repr',
+            'action_flag',
+            'action',
+            'change_message',
+        ]
+        read_only_fields = fields
+
+    def get_content_type(self, obj):
+        ct = getattr(obj, 'content_type', None)
+        if not ct:
+            return None
+        try:
+            return f'{ct.app_label}.{ct.model}'
+        except Exception:
+            return None
+
+    def get_action(self, obj):
+        m = {1: 'add', 2: 'change', 3: 'delete'}
+        return m.get(getattr(obj, 'action_flag', None), 'unknown')

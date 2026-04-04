@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { HomeFilled, Files, List, Collection, Operation as Odometer, Calendar, Monitor, DataLine } from '@element-plus/icons-vue'
+import { HomeFilled, Files, List, Collection, Operation as Odometer, Calendar, Monitor, DataLine, Document } from '@element-plus/icons-vue'
 import { clearTokens, getAccessToken } from './api'
 
 const route = useRoute()
@@ -15,6 +15,7 @@ const menuItems = [
   { path: '/schedules', name: 'schedules', icon: Calendar, label: '定时任务' },
   { path: '/perf', name: 'perf', icon: DataLine, label: '性能测试' },
   { path: '/envs', name: 'envs', icon: Monitor, label: '环境配置' },
+  { path: '/audit', name: 'audit', icon: Document, label: '审计日志' },
 ]
 
 function parseJwtUsername(token) {

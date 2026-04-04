@@ -9,13 +9,17 @@ import csv
 import html
 from urllib.parse import urlparse
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.contrib.admin.models import LogEntry, ADDITION, CHANGE, DELETION
+from django.contrib.contenttypes.models import ContentType
 from django.core.files.base import ContentFile
 from django.conf import settings
 from django.http import HttpResponse
 from django.db.models import Q
+from django.core.exceptions import ValidationError
 from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action, api_view
-from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import permission_classes
 from rest_framework.response import Response
@@ -29,24 +33,31 @@ from .serializers import (
     ProjectSerializer, TestCaseSerializer, TestSuiteSerializer, 
     TestRecordSerializer, SuiteRunSerializer, EnvConfigSerializer,
     PeriodicTaskSerializer, CrontabScheduleSerializer, PerfRecordSerializer,
-    TestCaseVersionSerializer
+    TestCaseVersionSerializer, AuditLogSerializer
 )
 from .engine import TestEngine, validate_outbound_http_url
+from .locust_codegen import generate_locust_code
 from .tasks import run_test_case_task, run_test_suite_task, run_perf_test_task
 from .crypto_utils import decrypt_json
 
-class ApiKeyOrReadOnly(BasePermission):
-    def has_permission(self, request, view):
-        if request.method in SAFE_METHODS:
-            return True
-        api_key = os.getenv('API_KEY')
-        if not api_key:
-            return False
-        provided = request.headers.get('X-API-Key') or request.query_params.get('api_key')
-        return provided == api_key
+def _audit(user, obj, action_flag, message):
+    try:
+        if not user or not getattr(user, 'is_authenticated', False):
+            return
+        ct = ContentType.objects.get_for_model(obj.__class__)
+        LogEntry.objects.log_action(
+            user_id=user.id,
+            content_type_id=ct.pk,
+            object_id=obj.pk,
+            object_repr=str(obj)[:200],
+            action_flag=action_flag,
+            change_message=str(message or '')[:2000],
+        )
+    except Exception:
+        return
 
 class EnvConfigViewSet(viewsets.ModelViewSet):
-    queryset = EnvConfig.objects.all()
+    queryset = EnvConfig.objects.select_related('project', 'project__owner').all()
     serializer_class = EnvConfigSerializer
     permission_classes = [IsAuthenticated]
     
@@ -72,6 +83,18 @@ class EnvConfigViewSet(viewsets.ModelViewSet):
                 pass
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
+
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        _audit(self.request.user, obj, ADDITION, f'创建环境: {obj.name}')
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        _audit(self.request.user, obj, CHANGE, f'更新环境: {obj.name}')
+
+    def perform_destroy(self, instance):
+        _audit(self.request.user, instance, DELETION, f'删除环境: {instance.name}')
+        instance.delete()
 
 class CrontabScheduleViewSet(viewsets.ModelViewSet):
     queryset = CrontabSchedule.objects.all()
@@ -113,8 +136,50 @@ class PeriodicTaskViewSet(
             raise PermissionDenied('无权限访问该定时任务')
         return obj
 
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        _audit(self.request.user, obj, CHANGE, f'更新定时任务: {obj.name}')
+
+    def perform_destroy(self, instance):
+        _audit(self.request.user, instance, DELETION, f'删除定时任务: {instance.name}')
+        instance.delete()
+
+class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = LogEntry.objects.select_related('user', 'content_type').all()
+    serializer_class = AuditLogSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset().filter(user=self.request.user).order_by('-action_time')
+        action = self.request.query_params.get('action')
+        model = self.request.query_params.get('model')
+        q = self.request.query_params.get('q')
+        if action in {'add', 'change', 'delete'}:
+            m = {'add': ADDITION, 'change': CHANGE, 'delete': DELETION}
+            qs = qs.filter(action_flag=m[action])
+        if model:
+            parts = str(model).split('.', 1)
+            if len(parts) == 2:
+                qs = qs.filter(content_type__app_label=parts[0], content_type__model=parts[1])
+        if q:
+            qs = qs.filter(Q(object_repr__icontains=q) | Q(change_message__icontains=q))
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        limit = request.query_params.get('limit')
+        if limit:
+            try:
+                n = int(limit)
+                if n > 0:
+                    qs = qs[: min(n, 500)]
+            except Exception:
+                pass
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
 class ProjectViewSet(viewsets.ModelViewSet):
-    queryset = Project.objects.all()
+    queryset = Project.objects.select_related('owner').all()
     serializer_class = ProjectSerializer
     permission_classes = [IsAuthenticated]
     
@@ -139,10 +204,19 @@ class ProjectViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
     
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+        obj = serializer.save(owner=self.request.user)
+        _audit(self.request.user, obj, ADDITION, f'创建项目: {obj.name}')
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        _audit(self.request.user, obj, CHANGE, f'更新项目: {obj.name}')
+
+    def perform_destroy(self, instance):
+        _audit(self.request.user, instance, DELETION, f'删除项目: {instance.name}')
+        instance.delete()
 
 class TestCaseViewSet(viewsets.ModelViewSet):
-    queryset = TestCase.objects.all()
+    queryset = TestCase.objects.select_related('project', 'project__owner').all()
     serializer_class = TestCaseSerializer
     permission_classes = [IsAuthenticated]
     
@@ -193,10 +267,16 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         case = serializer.save()
         self.create_version(case, self.request.user)
+        _audit(self.request.user, case, ADDITION, f'创建用例: {case.title}')
     
     def perform_update(self, serializer):
         case = serializer.save()
         self.create_version(case, self.request.user)
+        _audit(self.request.user, case, CHANGE, f'更新用例: {case.title}')
+
+    def perform_destroy(self, instance):
+        _audit(self.request.user, instance, DELETION, f'删除用例: {instance.title}')
+        instance.delete()
     
     @action(detail=True, methods=['get'])
     def versions(self, request, pk=None):
@@ -225,6 +305,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 setattr(case, f, snap.get(f))
         case.save()
         self.create_version(case, request.user)
+        _audit(request.user, case, CHANGE, f'回滚用例版本: {case.title}')
         return Response({'detail': '已回滚并生成新版本'})
 
     @action(detail=True, methods=['post'])
@@ -321,13 +402,29 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             enabled=enabled,
             description=description,
         )
+        _audit(request.user, pt, ADDITION, f'创建用例定时任务: case#{case.id}')
         return Response(PeriodicTaskSerializer(pt).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'])
     def schedules(self, request, pk=None):
         case = self.get_object()
-        qs = PeriodicTask.objects.filter(description__contains=f'"type": "case"').filter(description__contains=f'"case_id": {case.id}').filter(description__contains=f'"owner_id": {request.user.id}')
-        return Response(PeriodicTaskSerializer(qs.order_by('-id'), many=True).data)
+        qs = PeriodicTask.objects.filter(task='api.tasks.run_test_case_task').order_by('-id')[:500]
+        items = []
+        for pt in qs:
+            try:
+                d = json.loads(pt.description or '{}')
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if d.get('type') != 'case':
+                continue
+            if d.get('case_id') != case.id:
+                continue
+            if d.get('owner_id') != request.user.id:
+                continue
+            items.append(pt)
+        return Response(PeriodicTaskSerializer(items, many=True).data)
 
     @action(detail=True, methods=['post'])
     def run_perf(self, request, pk=None):
@@ -395,7 +492,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             status='running'
         )
 
-        locust_code = self.generate_locust_code(case, base_url=base_url, variables=merged_vars)
+        locust_code = generate_locust_code(case, base_url=base_url, variables=merged_vars)
         locust_file = f"perf_{perf_record.id}.py"
         perf_dir = os.path.join(str(getattr(settings, 'MEDIA_ROOT', os.getcwd())), 'perf', str(perf_record.id))
         os.makedirs(perf_dir, exist_ok=True)
@@ -416,84 +513,6 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             'perf_record_id': perf_record.id,
             'csv_prefix': csv_prefix
         })
-
-    def generate_locust_code(self, case, base_url=None, variables=None):
-        engine_vars = variables if isinstance(variables, dict) else {}
-        if base_url:
-            engine_vars = {**engine_vars, 'base_url': base_url, 'base': base_url}
-        engine = TestEngine(variables=engine_vars)
-        tasks = []
-        inferred_host = None
-        for idx, step in enumerate(case.steps or []):
-            if step.get('type') != 'http':
-                continue
-
-            method = str(step.get('method', 'GET')).upper().strip() or 'GET'
-            raw_url = step.get('url', '/')
-            rendered = engine.render_string(raw_url) if isinstance(raw_url, str) else raw_url
-            target = rendered if isinstance(rendered, str) else '/'
-            if target.startswith('http://') or target.startswith('https://'):
-                u = urlparse(target)
-                if not inferred_host and u.scheme and u.netloc:
-                    inferred_host = f"{u.scheme}://{u.netloc}"
-                path = u.path or '/'
-                if u.query:
-                    path = f"{path}?{u.query}"
-                target = path
-            if not isinstance(target, str) or not target:
-                target = '/'
-            if not target.startswith('/'):
-                target = f"/{target}"
-
-            headers = engine.parse_jsonish(step.get('headers', {}), default={})
-            if not isinstance(headers, dict):
-                headers = {}
-
-            body_raw = step.get('body', '')
-            body_obj = None
-            body_text = None
-            if isinstance(body_raw, (dict, list)):
-                body_obj = engine.render_data(body_raw)
-            elif isinstance(body_raw, str):
-                s = engine.render_string(body_raw)
-                try:
-                    parsed = json.loads(s) if s.strip() else None
-                except Exception:
-                    parsed = None
-                if isinstance(parsed, (dict, list)):
-                    body_obj = engine.render_data(parsed)
-                else:
-                    body_text = s
-
-            kwargs = []
-            if headers:
-                kwargs.append(f"headers={json.dumps(headers, ensure_ascii=False)}")
-            if body_obj is not None:
-                kwargs.append(f"json={json.dumps(body_obj, ensure_ascii=False)}")
-            elif body_text:
-                kwargs.append(f"data={json.dumps(body_text, ensure_ascii=False)}")
-            kwargs.append(f"name={json.dumps(f'{method} {target}', ensure_ascii=False)}")
-
-            kw = (', ' + ', '.join(kwargs)) if kwargs else ''
-            tasks.append(f"        self.client.request({json.dumps(method)}, {json.dumps(target)}{kw})")
-        if not tasks:
-            tasks = ["        pass"]
-
-        host = base_url or inferred_host or 'http://127.0.0.1'
-        safe_host = str(host).replace('"', '\\"')
-        
-        template = f"""
-from locust import HttpUser, task, between
-
-class QuickstartUser(HttpUser):
-    host = "{safe_host}"
-    wait_time = between(1, 2)
-
-    @task
-    def functional_case_task(self):
-{chr(10).join(tasks)}
-"""
-        return template.lstrip()
 
     @action(detail=True, methods=['get'])
     def records(self, request, pk=None):
@@ -562,6 +581,8 @@ class QuickstartUser(HttpUser):
                 if str(method).lower() not in allowed_methods:
                     continue
                 title = f"{method.upper()} {path} - {info.get('summary', 'OpenAPI Import')}"
+                if TestCase.objects.filter(project=project, title=title).exists():
+                    continue
                 TestCase.objects.create(
                     project=project,
                     title=title,
@@ -579,7 +600,7 @@ class QuickstartUser(HttpUser):
         return Response({'count': count})
 
 class TestSuiteViewSet(viewsets.ModelViewSet):
-    queryset = TestSuite.objects.all()
+    queryset = TestSuite.objects.select_related('project', 'project__owner').all()
     serializer_class = TestSuiteSerializer
     permission_classes = [IsAuthenticated]
     
@@ -605,6 +626,18 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                 pass
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
+
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        _audit(self.request.user, obj, ADDITION, f'创建套件: {obj.name}')
+
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        _audit(self.request.user, obj, CHANGE, f'更新套件: {obj.name}')
+
+    def perform_destroy(self, instance):
+        _audit(self.request.user, instance, DELETION, f'删除套件: {instance.name}')
+        instance.delete()
 
     def build_suite_locust_code(self, suite, base_url=None):
         engine = TestEngine(variables={'base_url': base_url, 'base': base_url} if base_url else {})
@@ -766,13 +799,29 @@ class {safe_name}(HttpUser):
             enabled=bool(enabled),
             description=description,
         )
+        _audit(request.user, pt, ADDITION, f'创建套件定时任务: suite#{suite.id}')
         return Response(PeriodicTaskSerializer(pt).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'])
     def schedules(self, request, pk=None):
         suite = self.get_object()
-        qs = PeriodicTask.objects.filter(description__contains=f'"type": "suite"').filter(description__contains=f'"suite_id": {suite.id}').filter(description__contains=f'"owner_id": {request.user.id}')
-        return Response(PeriodicTaskSerializer(qs.order_by('-id'), many=True).data)
+        qs = PeriodicTask.objects.filter(task='api.tasks.run_test_suite_task').order_by('-id')[:500]
+        items = []
+        for pt in qs:
+            try:
+                d = json.loads(pt.description or '{}')
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            if d.get('type') != 'suite':
+                continue
+            if d.get('suite_id') != suite.id:
+                continue
+            if d.get('owner_id') != request.user.id:
+                continue
+            items.append(pt)
+        return Response(PeriodicTaskSerializer(items, many=True).data)
 
     @action(detail=True, methods=['get'])
     def runs(self, request, pk=None):
@@ -782,7 +831,7 @@ class {safe_name}(HttpUser):
         return Response(serializer.data)
 
 class TestRecordViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = TestRecord.objects.all().order_by('-created_at')
+    queryset = TestRecord.objects.select_related('case', 'case__project', 'case__project__owner').all().order_by('-created_at')
     serializer_class = TestRecordSerializer
     permission_classes = [IsAuthenticated]
     
@@ -801,6 +850,26 @@ class TestRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 screenshot_url = request.build_absolute_uri(record.screenshot.url)
             except Exception:
                 screenshot_url = record.screenshot.url
+
+        fmt = (request.query_params.get('format') or '').strip().lower()
+        if fmt == 'json':
+            payload = {
+                'record_id': record.id,
+                'case_id': case.id,
+                'case_title': case.title,
+                'project_id': project.id,
+                'project_name': project.name,
+                'status': record.status,
+                'elapsed_time': record.elapsed_time,
+                'created_at': record.created_at.isoformat() if record.created_at else None,
+                'result_log': record.result_log or '',
+                'step_results': record.step_results or [],
+                'screenshot_url': screenshot_url,
+            }
+            resp = Response(payload)
+            if request.query_params.get('download') in {'1', 'true', 'yes'}:
+                resp['Content-Disposition'] = f'attachment; filename="record_{record.id}.json"'
+            return resp
 
         status_map = {
             'success': ('通过', '#67C23A'),
@@ -898,7 +967,7 @@ class TestRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
 class SuiteRunViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = SuiteRun.objects.all().order_by('-created_at')
+    queryset = SuiteRun.objects.select_related('suite', 'suite__project', 'suite__project__owner').all().order_by('-created_at')
     serializer_class = SuiteRunSerializer
     permission_classes = [IsAuthenticated]
     
@@ -906,8 +975,28 @@ class SuiteRunViewSet(viewsets.ReadOnlyModelViewSet):
         qs = super().get_queryset()
         return qs.filter(suite__project__owner=self.request.user).order_by('-created_at')
 
+    @action(detail=True, methods=['get'])
+    def export(self, request, pk=None):
+        run = self.get_object()
+        suite = run.suite
+        payload = {
+            'suite_run_id': run.id,
+            'suite_id': suite.id,
+            'suite_name': suite.name,
+            'project_id': suite.project_id,
+            'project_name': suite.project.name,
+            'stop_on_failure': run.stop_on_failure,
+            'created_at': run.created_at.isoformat() if run.created_at else None,
+            'summary': run.summary or {},
+            'results': run.results or [],
+        }
+        resp = Response(payload)
+        if request.query_params.get('download') in {'1', 'true', 'yes'}:
+            resp['Content-Disposition'] = f'attachment; filename="suite_run_{run.id}.json"'
+        return resp
+
 class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = PerfRecord.objects.all().order_by('-created_at')
+    queryset = PerfRecord.objects.select_related('case', 'case__project', 'case__project__owner').all().order_by('-created_at')
     serializer_class = PerfRecordSerializer
     permission_classes = [IsAuthenticated]
     
@@ -1061,13 +1150,14 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if base_url:
             merged_vars['base_url'] = base_url
 
-        code = TestCaseViewSet().generate_locust_code(case, base_url=base_url, variables=merged_vars)
+        code = generate_locust_code(case, base_url=base_url, variables=merged_vars)
         filename = f"locust_perf_{perf_record.id}_{self.sanitize_filename(case.title, default='case')}.py"
         resp = HttpResponse(code, content_type='text/x-python; charset=utf-8')
         resp['Content-Disposition'] = f'attachment; filename="{filename}"'
         return resp
 
 @api_view(['GET'])
+@permission_classes([AllowAny])
 def task_status(request, task_id):
     result = AsyncResult(task_id)
     return Response({
@@ -1095,11 +1185,13 @@ class RegisterView(APIView):
         password = request.data.get('password') or ''
         if not username or not password:
             return Response({'detail': '缺少 username 或 password'}, status=status.HTTP_400_BAD_REQUEST)
-        if len(password) < 6:
-            return Response({'detail': '密码长度至少 6 位'}, status=status.HTTP_400_BAD_REQUEST)
         User = get_user_model()
         if User.objects.filter(username=username).exists():
             return Response({'detail': '用户名已存在'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(password, user=User(username=username))
+        except ValidationError as e:
+            return Response({'detail': list(getattr(e, 'messages', []) or ['密码不符合安全要求'])}, status=status.HTTP_400_BAD_REQUEST)
         user = User.objects.create_user(username=username, password=password)
         return Response({'id': user.id, 'username': user.username}, status=status.HTTP_201_CREATED)
 
