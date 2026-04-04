@@ -2,6 +2,7 @@ import time
 import requests
 import json
 import sqlite3
+import os
 import re
 from jsonschema import validate
 from faker import Faker
@@ -228,8 +229,20 @@ class TestEngine:
         self.add_log(f"执行数据库{'命令' if execute else '查询'}: {sql}")
         try:
             from django.conf import settings
-            db_name = settings.DATABASES.get('default', {}).get('NAME', 'db.sqlite3')
-            conn = sqlite3.connect(str(db_name))
+            base_dir = str(getattr(settings, 'BASE_DIR', os.getcwd()))
+            db_name = None
+            if isinstance(self.db_config, dict):
+                for k in ['sqlite_path', 'path', 'NAME', 'name', 'db', 'database']:
+                    v = self.db_config.get(k)
+                    if v:
+                        db_name = v
+                        break
+            if not db_name:
+                db_name = settings.DATABASES.get('default', {}).get('NAME', 'db.sqlite3')
+            db_name = str(db_name)
+            if not os.path.isabs(db_name):
+                db_name = os.path.join(base_dir, db_name)
+            conn = sqlite3.connect(db_name)
             cursor = conn.cursor()
             if execute:
                 # 支持多条 SQL 执行 (以 ; 分隔)
@@ -266,33 +279,62 @@ class TestEngine:
 
         if not self.driver:
             self.add_log("初始化浏览器 (Headless模式)...")
+            browser_cfg = step.get('browser') if isinstance(step.get('browser'), dict) else {}
+            headless = browser_cfg.get('headless')
+            if headless is None:
+                headless = step.get('headless')
+            if headless is None:
+                headless = True
             options = webdriver.ChromeOptions()
-            options.add_argument('--headless')
+            if headless:
+                options.add_argument('--headless')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
+            win_size = browser_cfg.get('window_size') or browser_cfg.get('windowSize') or step.get('window_size')
+            if isinstance(win_size, str) and win_size.strip():
+                options.add_argument(f'--window-size={win_size.strip()}')
             self.driver = webdriver.Chrome(options=options)
 
         self.add_log(f"UI 动作: {action} {url or selector or ''}")
         try:
+            by_raw = step.get('by') or 'css'
+            by_key = str(by_raw).strip().lower()
+            by_map = {
+                'css': By.CSS_SELECTOR,
+                'css_selector': By.CSS_SELECTOR,
+                'xpath': By.XPATH,
+                'id': By.ID,
+                'name': By.NAME,
+                'class': By.CLASS_NAME,
+                'class_name': By.CLASS_NAME,
+                'tag': By.TAG_NAME,
+                'tag_name': By.TAG_NAME,
+                'link_text': By.LINK_TEXT,
+                'partial_link_text': By.PARTIAL_LINK_TEXT,
+            }
+            by = by_map.get(by_key, By.CSS_SELECTOR)
             if action == 'open':
                 self.driver.get(url)
             elif action == 'click':
                 el = WebDriverWait(self.driver, timeout).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    EC.element_to_be_clickable((by, selector))
                 )
                 el.click()
             elif action == 'input':
                 el = WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    EC.presence_of_element_located((by, selector))
                 )
                 el.clear()
                 el.send_keys(text)
             elif action == 'wait_visible':
                 WebDriverWait(self.driver, timeout).until(
-                    EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+                    EC.visibility_of_element_located((by, selector))
                 )
             elif action == 'sleep':
-                time.sleep(float(url or 1))
+                seconds = step.get('seconds')
+                if seconds is None:
+                    seconds = url or 1
+                time.sleep(float(seconds))
             
             return True
         except Exception as e:

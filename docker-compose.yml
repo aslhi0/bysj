@@ -1,4 +1,15 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: autotest
+      POSTGRES_USER: autotest
+      POSTGRES_PASSWORD: autotest
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   redis:
     image: redis:7-alpine
     ports:
@@ -12,12 +23,18 @@ services:
       DJANGO_DEBUG: "true"
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_CORS_ALLOW_ALL: "true"
+      DJANGO_DB_ENGINE: "postgres"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "autotest"
+      POSTGRES_USER: "autotest"
+      POSTGRES_PASSWORD: "autotest"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/1"
     depends_on:
+      - postgres
       - redis
     volumes:
-      - ./backend/db.sqlite3:/app/backend/db.sqlite3
       - ./backend/media:/app/backend/media
     ports:
       - "8000:8000"
@@ -33,13 +50,19 @@ services:
       DJANGO_DEBUG: "true"
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_CORS_ALLOW_ALL: "true"
+      DJANGO_DB_ENGINE: "postgres"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "autotest"
+      POSTGRES_USER: "autotest"
+      POSTGRES_PASSWORD: "autotest"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/1"
     depends_on:
+      - postgres
       - redis
       - backend
     volumes:
-      - ./backend/db.sqlite3:/app/backend/db.sqlite3
       - ./backend/media:/app/backend/media
     command: celery -A core worker -l info
 
@@ -51,13 +74,19 @@ services:
       DJANGO_DEBUG: "true"
       DJANGO_ALLOWED_HOSTS: "*"
       DJANGO_CORS_ALLOW_ALL: "true"
+      DJANGO_DB_ENGINE: "postgres"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: "autotest"
+      POSTGRES_USER: "autotest"
+      POSTGRES_PASSWORD: "autotest"
       CELERY_BROKER_URL: "redis://redis:6379/0"
       CELERY_RESULT_BACKEND: "redis://redis:6379/1"
     depends_on:
+      - postgres
       - redis
       - backend
     volumes:
-      - ./backend/db.sqlite3:/app/backend/db.sqlite3
       - ./backend/media:/app/backend/media
     command: celery -A core beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
 
@@ -71,3 +100,6 @@ services:
       - backend
     ports:
       - "5173:5173"
+
+volumes:
+  postgres_data:

@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
+import { apiFetch } from '../api'
 
 const loading = ref(false)
 const rows = ref([])
@@ -23,7 +24,7 @@ const filteredRows = computed(() => {
 async function load() {
   loading.value = true
   try {
-    const res = await fetch('/api/projects/')
+    const res = await apiFetch('/api/projects/')
     rows.value = await res.json()
   } finally {
     loading.value = false
@@ -59,7 +60,7 @@ async function submit() {
   const url = isEdit.value ? `/api/projects/${editId.value}/` : '/api/projects/'
   const method = isEdit.value ? 'PUT' : 'POST'
 
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -81,7 +82,9 @@ async function removeRow(row) {
   await ElMessageBox.confirm(`确定删除项目「${row.name}」？关联用例将一并删除。`, '确认', {
     type: 'warning',
   })
-  const res = await fetch(`/api/projects/${row.id}/`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/projects/${row.id}/`, {
+    method: 'DELETE',
+  })
   if (res.status === 204 || res.ok) {
     ElMessage.success('已删除')
     load()

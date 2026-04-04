@@ -3,6 +3,7 @@ import { ref, onMounted, nextTick } from 'vue'
 import { Monitor, DataLine, Loading, Download } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
+import { apiFetch } from '../api'
 
 const loading = ref(false)
 const records = ref([])
@@ -16,7 +17,7 @@ let myChart = null
 async function loadRecords() {
   loading.value = true
   try {
-    const res = await fetch('/api/perf-records/')
+    const res = await apiFetch('/api/perf-records/')
     records.value = await res.json()
   } finally {
     loading.value = false
@@ -70,7 +71,7 @@ async function openReport(row) {
   report.value = null
   disposeChart()
   try {
-    const res = await fetch(`/api/perf-records/${row.id}/report/`)
+    const res = await apiFetch(`/api/perf-records/${row.id}/report/`)
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
       ElMessage.error(data.detail || '加载压测报告失败')
@@ -98,7 +99,7 @@ function locustDownloadFilename(row) {
 
 async function downloadLocust(row) {
   try {
-    const res = await fetch(`/api/perf-records/${row.id}/locust/`)
+    const res = await apiFetch(`/api/perf-records/${row.id}/locust/`)
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
       ElMessage.error(data.detail || '下载失败')

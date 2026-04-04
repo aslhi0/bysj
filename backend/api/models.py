@@ -1,6 +1,8 @@
 from django.db import models
+from django.conf import settings
 
 class Project(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='projects', verbose_name='所属用户')
     name = models.CharField('项目名称', max_length=100)
     description = models.TextField('项目描述', blank=True)
     webhook_url = models.URLField('Webhook地址', blank=True, help_text='如钉钉/企微群机器人')
@@ -56,6 +58,21 @@ class TestCase(models.Model):
 
     def __str__(self):
         return self.title
+
+class TestCaseVersion(models.Model):
+    case = models.ForeignKey(TestCase, on_delete=models.CASCADE, related_name='versions', verbose_name='所属用例')
+    version = models.IntegerField('版本号')
+    snapshot = models.JSONField('快照', default=dict)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='case_versions', verbose_name='创建人')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = '用例版本'
+        verbose_name_plural = verbose_name
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['case', 'version'], name='uniq_case_version'),
+        ]
 
 class TestSuite(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='suites', verbose_name='所属项目')

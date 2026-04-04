@@ -1,6 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { getAccessToken } from '../api'
 
 const routes = [
+  {
+    path: '/login',
+    name: 'login',
+    component: () => import('../views/LoginView.vue'),
+  },
   {
     path: '/',
     name: 'home',
@@ -38,7 +44,16 @@ const routes = [
   },
 ]
 
-export default createRouter({
+const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+router.beforeEach((to) => {
+  if (to.path === '/login') return true
+  const token = getAccessToken()
+  if (!token) return { path: '/login', query: { redirect: to.fullPath } }
+  return true
+})
+
+export default router

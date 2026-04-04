@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, Edit, Calendar, Timer } from '@element-plus/icons-vue'
+import { apiFetch } from '../api'
 
 const loading = ref(false)
 const schedules = ref([])
@@ -47,7 +48,7 @@ const crontabDialogVisible = ref(false)
 async function loadSchedules() {
   loading.value = true
   try {
-    const res = await fetch('/api/schedules/')
+    const res = await apiFetch('/api/schedules/')
     schedules.value = await res.json()
   } finally {
     loading.value = false
@@ -55,22 +56,22 @@ async function loadSchedules() {
 }
 
 async function loadCrontabs() {
-  const res = await fetch('/api/crontabs/')
+  const res = await apiFetch('/api/crontabs/')
   crontabs.value = await res.json()
 }
 
 async function loadSuites() {
-  const res = await fetch('/api/suites/')
+  const res = await apiFetch('/api/suites/')
   suites.value = await res.json()
 }
 
 async function loadCases() {
-  const res = await fetch('/api/cases/')
+  const res = await apiFetch('/api/cases/')
   cases.value = await res.json()
 }
 
 async function loadEnvs() {
-  const res = await fetch('/api/envs/')
+  const res = await apiFetch('/api/envs/')
   envs.value = await res.json()
 }
 
@@ -162,7 +163,7 @@ async function submitQuick() {
     ? { ...basePayload, stop_on_failure: quickForm.stop_on_failure }
     : basePayload
 
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -184,7 +185,7 @@ async function submit() {
   const url = isEdit.value ? `/api/schedules/${editId.value}/` : '/api/schedules/'
   const method = isEdit.value ? 'PUT' : 'POST'
 
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(form)
@@ -200,7 +201,7 @@ async function submit() {
 }
 
 async function submitCrontab() {
-  const res = await fetch('/api/crontabs/', {
+  const res = await apiFetch('/api/crontabs/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(crontabForm)
@@ -215,7 +216,7 @@ async function submitCrontab() {
 }
 
 async function toggleStatus(row) {
-  const res = await fetch(`/api/schedules/${row.id}/`, {
+  const res = await apiFetch(`/api/schedules/${row.id}/`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled: row.enabled })
@@ -226,7 +227,9 @@ async function toggleStatus(row) {
 }
 
 async function triggerSchedule(row) {
-  const res = await fetch(`/api/schedules/${row.id}/trigger/`, { method: 'POST' })
+  const res = await apiFetch(`/api/schedules/${row.id}/trigger/`, {
+    method: 'POST',
+  })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     return ElMessage.error(data.detail || '触发失败')
@@ -237,7 +240,9 @@ async function triggerSchedule(row) {
 async function removeSchedule(row) {
   try {
     await ElMessageBox.confirm('确定删除该定时任务吗？', '警告', { type: 'warning' })
-    const res = await fetch(`/api/schedules/${row.id}/`, { method: 'DELETE' })
+    const res = await apiFetch(`/api/schedules/${row.id}/`, {
+      method: 'DELETE',
+    })
     if (res.ok) {
       ElMessage.success('已删除')
       loadSchedules()

@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
+import { apiFetch } from '../api'
 
 const loading = ref(false)
 const runLoading = ref(false)
@@ -85,24 +86,24 @@ const caseIdHint = computed(() => {
 })
 
 async function loadProjects() {
-  const res = await fetch('/api/projects/')
+  const res = await apiFetch('/api/projects/')
   projects.value = await res.json()
 }
 
 async function loadCases() {
-  const res = await fetch('/api/cases/')
+  const res = await apiFetch('/api/cases/')
   cases.value = await res.json()
 }
 
 async function loadEnvs() {
-  const res = await fetch('/api/envs/')
+  const res = await apiFetch('/api/envs/')
   envs.value = await res.json()
 }
 
 async function loadSuites() {
   loading.value = true
   try {
-    const res = await fetch('/api/suites/')
+    const res = await apiFetch('/api/suites/')
     suites.value = await res.json()
   } finally {
     loading.value = false
@@ -177,7 +178,7 @@ async function submitSuite() {
   const url = isEdit.value ? `/api/suites/${editId.value}/` : '/api/suites/'
   const method = isEdit.value ? 'PUT' : 'POST'
 
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -200,7 +201,9 @@ async function submitSuite() {
 
 async function removeSuite(row) {
   await ElMessageBox.confirm(`删除套件「${row.name}」？`, '确认', { type: 'warning' })
-  const res = await fetch(`/api/suites/${row.id}/`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/suites/${row.id}/`, {
+    method: 'DELETE',
+  })
   if (res.status === 204 || res.ok) {
     ElMessage.success('已删除')
     loadSuites()
@@ -229,7 +232,7 @@ async function submitRun() {
   let startedPolling = false
   runLoading.value = true
   try {
-    const res = await fetch(`/api/suites/${runTargetId.value}/run/`, {
+    const res = await apiFetch(`/api/suites/${runTargetId.value}/run/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -261,7 +264,7 @@ async function submitRun() {
 async function pollTaskStatus(taskId) {
   const timer = setInterval(async () => {
     try {
-      const res = await fetch(`/api/task-status/${taskId}/`)
+      const res = await apiFetch(`/api/task-status/${taskId}/`)
       const data = await res.json().catch(() => ({}))
       if (!data.ready) return
       clearInterval(timer)
@@ -308,7 +311,7 @@ function locustDownloadFilename(row) {
 
 async function downloadLocust(row) {
   try {
-    const res = await fetch(`/api/suites/${row.id}/export_locust/`)
+    const res = await apiFetch(`/api/suites/${row.id}/export_locust/`)
     if (!res.ok) {
       ElMessage.error('导出失败')
       return
@@ -332,7 +335,7 @@ async function openHistory(row) {
   historyLoading.value = true
   historyRuns.value = []
   try {
-    const res = await fetch(`/api/suites/${row.id}/runs/?limit=50`)
+    const res = await apiFetch(`/api/suites/${row.id}/runs/?limit=50`)
     if (res.ok) {
       historyRuns.value = await res.json()
     } else {

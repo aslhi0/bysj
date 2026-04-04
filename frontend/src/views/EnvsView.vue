@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Delete, Edit, Monitor } from '@element-plus/icons-vue'
+import { apiFetch } from '../api'
 
 const loading = ref(false)
 const envs = ref([])
@@ -17,6 +18,7 @@ const form = reactive({
   name: '',
   base_url: '',
   variablesJson: '{}',
+  dbConfigJson: '{}',
   is_default: false
 })
 
@@ -37,14 +39,14 @@ const projectOptions = computed(() =>
 )
 
 async function loadProjects() {
-  const res = await fetch('/api/projects/')
+  const res = await apiFetch('/api/projects/')
   projects.value = await res.json()
 }
 
 async function loadEnvs() {
   loading.value = true
   try {
-    const res = await fetch('/api/envs/')
+    const res = await apiFetch('/api/envs/')
     envs.value = await res.json()
   } finally {
     loading.value = false
@@ -63,6 +65,7 @@ function openCreate() {
   form.name = ''
   form.base_url = ''
   form.variablesJson = '{}'
+  form.dbConfigJson = '{}'
   form.is_default = false
   dialogVisible.value = true
 }
@@ -74,6 +77,7 @@ function openEdit(row) {
   form.name = row.name
   form.base_url = row.base_url
   form.variablesJson = JSON.stringify(row.variables || {}, null, 2)
+  form.dbConfigJson = JSON.stringify(row.db_config || {}, null, 2)
   form.is_default = row.is_default
   dialogVisible.value = true
 }
@@ -88,11 +92,17 @@ async function submit() {
   } catch {
     return ElMessage.error('环境变量须为合法 JSON 对象')
   }
+  let db_config
+  try {
+    db_config = JSON.parse(form.dbConfigJson || '{}')
+  } catch {
+    return ElMessage.error('数据库配置须为合法 JSON 对象')
+  }
 
   const url = isEdit.value ? `/api/envs/${editId.value}/` : '/api/envs/'
   const method = isEdit.value ? 'PUT' : 'POST'
 
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -100,6 +110,7 @@ async function submit() {
       name: form.name.trim(),
       base_url: form.base_url.trim(),
       variables,
+      db_config,
       is_default: form.is_default
     })
   })
@@ -116,7 +127,9 @@ async function submit() {
 async function removeEnv(row) {
   try {
     await ElMessageBox.confirm('确定删除该环境配置吗？', '警告', { type: 'warning' })
-    const res = await fetch(`/api/envs/${row.id}/`, { method: 'DELETE' })
+    const res = await apiFetch(`/api/envs/${row.id}/`, {
+      method: 'DELETE',
+    })
     if (res.ok) {
       ElMessage.success('已删除')
       loadEnvs()
@@ -173,6 +186,9 @@ async function removeEnv(row) {
         </el-form-item>
         <el-form-item label="环境变量">
           <el-input v-model="form.variablesJson" type="textarea" :rows="5" placeholder='{"db_host": "127.0.0.1", "token": "xxx"}' />
+        </el-form-item>
+        <el-form-item label="数据库配置">
+          <el-input v-model="form.dbConfigJson" type="textarea" :rows="4" placeholder='{"sqlite_path":"db.sqlite3"}' />
         </el-form-item>
         <el-form-item label="设为默认">
           <el-switch v-model="form.is_default" />

@@ -2,6 +2,7 @@
 import { onMounted, ref, nextTick } from 'vue'
 import { Monitor, Files, List, Collection, Check, Close } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
+import { apiFetch } from '../api'
 
 const apiStatus = ref('加载中…')
 const apiOk = ref(false)
@@ -56,10 +57,10 @@ onMounted(async () => {
   
   try {
     const [p, c, s, r] = await Promise.all([
-      fetch('/api/projects/').then(res => res.json()),
-      fetch('/api/cases/').then(res => res.json()),
-      fetch('/api/suites/').then(res => res.json()),
-      fetch('/api/records/recent/').then(res => res.json()),
+      apiFetch('/api/projects/').then(res => res.json()),
+      apiFetch('/api/cases/').then(res => res.json()),
+      apiFetch('/api/suites/').then(res => res.json()),
+      apiFetch('/api/records/recent/').then(res => res.json()),
     ])
     stats.value.projects = p.length || 0
     stats.value.cases = c.length || 0

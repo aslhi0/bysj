@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { ArrowDown, ArrowUp, Delete, Picture, Search } from '@element-plus/icons-vue'
+import { apiFetch } from '../api'
 
 const loading = ref(false)
 const runLoading = ref(false)
@@ -30,6 +31,12 @@ const historyLoading = ref(false)
 const historyTitle = ref('')
 const historyRecords = ref([])
 const historyCaseId = ref(null)
+const versionsDialogVisible = ref(false)
+const versionsLoading = ref(false)
+const versionsTitle = ref('')
+const versionsList = ref([])
+const snapshotDialogVisible = ref(false)
+const snapshotText = ref('')
 const cases = ref([])
 const projects = ref([])
 const envs = ref([])
@@ -108,6 +115,9 @@ function addStep(type) {
       url: '',
       selector: '',
       text: '',
+      by: 'css',
+      headless: true,
+      seconds: 1,
       timeout: 10,
     })
   }
@@ -143,8 +153,9 @@ function removeAssertion(step, index) {
 const STEPS_PLACEHOLDER = `混跑示例：HTTP → UI(Selenium) → 再 HTTP
 [
   {"type":"http","method":"GET","url":"https://httpbin.org/uuid","capture":{"uid":{"from":"json","path":"uuid"}}},
-  {"type":"ui","action":"open","url":"https://example.com","browser":{"headless":true}},
-  {"type":"ui","action":"click","selector":"a","timeout":10,"by":"css"},
+  {"type":"ui","action":"open","url":"https://example.com","headless":true},
+  {"type":"ui","action":"click","by":"css","selector":"a","timeout":10},
+  {"type":"ui","action":"click","by":"xpath","selector":"//a","timeout":10},
   {"type":"http","method":"GET","url":"https://httpbin.org/get?tag={{uid}}"}
 ]
 UI 支持: open, click, input, wait_visible, sleep；本地调试可把 headless 改为 false。`
@@ -172,12 +183,12 @@ function stepCount(row) {
 }
 
 async function loadProjects() {
-  const res = await fetch('/api/projects/')
+  const res = await apiFetch('/api/projects/')
   projects.value = await res.json()
 }
 
 async function loadEnvs() {
-  const res = await fetch('/api/envs/')
+  const res = await apiFetch('/api/envs/')
   envs.value = await res.json()
 }
 
@@ -185,7 +196,7 @@ async function loadCases() {
   if (runLoading.value) return
   loading.value = true
   try {
-    const res = await fetch('/api/cases/')
+    const res = await apiFetch('/api/cases/')
     cases.value = await res.json()
   } finally {
     loading.value = false
@@ -216,7 +227,16 @@ function openEdit(row) {
   editId.value = row.id
   form.project = row.project
   form.title = row.title
-  form.steps = JSON.parse(JSON.stringify(row.steps || []))
+  form.steps = JSON.parse(JSON.stringify(row.steps || [])).map((s) => {
+    if (s && s.type === 'ui') {
+      if (s.headless === undefined && s.browser && s.browser.headless !== undefined) {
+        s.headless = s.browser.headless
+      }
+      if (!s.by) s.by = 'css'
+      if (s.seconds === undefined) s.seconds = 1
+    }
+    return s
+  })
   form.variablesJson = JSON.stringify(row.variables || {}, null, 2)
   form.setup_sql = row.setup_sql || ''
   form.teardown_sql = row.teardown_sql || ''
@@ -256,7 +276,7 @@ async function submit() {
   const url = isEdit.value ? `/api/cases/${editId.value}/` : '/api/cases/'
   const method = isEdit.value ? 'PUT' : 'POST'
 
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -273,7 +293,9 @@ async function submit() {
 
 async function removeRow(row) {
   await ElMessageBox.confirm(`确定删除用例「${row.title}」？`, '确认', { type: 'warning' })
-  const res = await fetch(`/api/cases/${row.id}/`, { method: 'DELETE' })
+  const res = await apiFetch(`/api/cases/${row.id}/`, {
+    method: 'DELETE',
+  })
   if (res.status === 204 || res.ok) {
     ElMessage.success('已删除')
     loadCases()
@@ -321,7 +343,7 @@ async function submitImport() {
   }
   importLoading.value = true
   try {
-    const res = await fetch('/api/cases/import-openapi/', {
+    const res = await apiFetch('/api/cases/import-openapi/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -350,7 +372,7 @@ async function openCaseHistory(row) {
   historyLoading.value = true
   historyRecords.value = []
   try {
-    const res = await fetch(`/api/cases/${row.id}/records/?limit=50`)
+    const res = await apiFetch(`/api/cases/${row.id}/records/?limit=50`)
     if (res.ok) {
       historyRecords.value = await res.json()
     } else {
@@ -361,6 +383,47 @@ async function openCaseHistory(row) {
   } finally {
     historyLoading.value = false
   }
+}
+
+async function openCaseVersions(row) {
+  versionsTitle.value = row.title
+  versionsDialogVisible.value = true
+  versionsLoading.value = true
+  versionsList.value = []
+  try {
+    const res = await apiFetch(`/api/cases/${row.id}/versions/`)
+    if (res.ok) {
+      versionsList.value = await res.json()
+    } else {
+      ElMessage.error('加载版本历史失败')
+    }
+  } catch (e) {
+    ElMessage.error(String(e))
+  } finally {
+    versionsLoading.value = false
+  }
+}
+
+function showSnapshot(row) {
+  snapshotText.value = JSON.stringify(row.snapshot || {}, null, 2)
+  snapshotDialogVisible.value = true
+}
+
+async function restoreVersion(caseId, v) {
+  await ElMessageBox.confirm(`回滚到版本 v${v.version}？将生成一个新版本保存当前状态。`, '确认', { type: 'warning' })
+  const res = await apiFetch(`/api/cases/${caseId}/restore_version/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version_id: v.id }),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    ElMessage.error(data.detail || '回滚失败')
+    return
+  }
+  ElMessage.success('已回滚')
+  versionsDialogVisible.value = false
+  await loadCases()
 }
 
 function showRecordLog(row) {
@@ -385,7 +448,7 @@ function openPerfDialog(row) {
 }
 
 async function submitPerf() {
-  const res = await fetch(`/api/cases/${perfForm.id}/run_perf/`, {
+  const res = await apiFetch(`/api/cases/${perfForm.id}/run_perf/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -406,7 +469,7 @@ async function submitPerf() {
 async function runCase(row) {
   runLoading.value = true
   try {
-    const res = await fetch(`/api/cases/${row.id}/run/`, {
+    const res = await apiFetch(`/api/cases/${row.id}/run/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -427,7 +490,7 @@ async function runCase(row) {
 async function pollTaskStatus(taskId, title) {
   const timer = setInterval(async () => {
     try {
-      const res = await fetch(`/api/task-status/${taskId}/`)
+      const res = await apiFetch(`/api/task-status/${taskId}/`)
       const data = await res.json()
       if (data.ready) {
         clearInterval(timer)
@@ -512,6 +575,7 @@ async function pollTaskStatus(taskId, title) {
               <el-button type="success" link :disabled="runLoading" @click="openPerfDialog(row)">压测</el-button>
               <el-button type="primary" link :disabled="runLoading" @click="openEdit(row)">编辑</el-button>
               <el-button type="info" link :disabled="runLoading" @click="openCaseHistory(row)">执行历史</el-button>
+              <el-button type="warning" link :disabled="runLoading" @click="openCaseVersions(row)">版本</el-button>
               <el-button type="danger" link :disabled="runLoading" @click="removeRow(row)">删除</el-button>
             </template>
           </el-table-column>
@@ -552,6 +616,40 @@ async function pollTaskStatus(taskId, title) {
       </div>
       <template #footer>
         <el-button type="primary" @click="historyDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="versionsDialogVisible"
+      :title="`版本历史 — ${versionsTitle}`"
+      width="780px"
+      destroy-on-close
+    >
+      <div v-loading="versionsLoading">
+        <el-table v-if="versionsList.length" :data="versionsList" size="small" max-height="420" stripe>
+          <el-table-column prop="version" label="版本" width="90">
+            <template #default="{ row }">v{{ row.version }}</template>
+          </el-table-column>
+          <el-table-column prop="created_by_username" label="创建人" width="120" />
+          <el-table-column prop="created_at" label="时间" width="180" />
+          <el-table-column label="操作" width="200" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="showSnapshot(row)">快照</el-button>
+              <el-button type="warning" link size="small" @click="restoreVersion(row.case, row)">回滚</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else-if="!versionsLoading" description="暂无版本记录" />
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="versionsDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="snapshotDialogVisible" title="版本快照" width="760px" destroy-on-close>
+      <el-input v-model="snapshotText" type="textarea" :rows="18" readonly />
+      <template #footer>
+        <el-button type="primary" @click="snapshotDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -776,14 +874,38 @@ async function pollTaskStatus(taskId, title) {
                   <el-select v-model="step.action" style="width: 130px">
                     <el-option v-for="a in UI_ACTIONS" :key="a.value" :label="a.label" :value="a.value" />
                   </el-select>
-                  <el-input v-if="step.action === 'open' || step.action === 'sleep'" 
-                            v-model="step.url" 
-                            :placeholder="step.action === 'open' ? '地址' : '等待秒数'" 
-                            style="flex: 1" />
-                  <el-input v-else v-model="step.selector" placeholder="CSS/XPath 选择器" style="flex: 1" />
+                  <el-input
+                    v-if="step.action === 'open'"
+                    v-model="step.url"
+                    placeholder="地址"
+                    style="flex: 1"
+                  />
+                  <el-input-number
+                    v-else-if="step.action === 'sleep'"
+                    v-model="step.seconds"
+                    :min="0"
+                    :max="3600"
+                    controls-position="right"
+                    style="flex: 1"
+                  />
+                  <template v-else>
+                    <el-select v-model="step.by" style="width: 110px">
+                      <el-option label="CSS" value="css" />
+                      <el-option label="XPath" value="xpath" />
+                      <el-option label="ID" value="id" />
+                      <el-option label="Name" value="name" />
+                    </el-select>
+                    <el-input v-model="step.selector" placeholder="选择器" style="flex: 1" />
+                  </template>
                 </div>
                 <div v-if="step.action === 'input'" style="margin-top: 8px">
                   <el-input v-model="step.text" placeholder="输入内容" />
+                </div>
+                <div style="display: flex; gap: 12px; align-items: center; margin-top: 10px">
+                  <el-switch v-model="step.headless" />
+                  <span style="font-size: 12px; color: var(--el-text-color-secondary)">Headless</span>
+                  <el-input-number v-model="step.timeout" :min="1" :max="120" controls-position="right" />
+                  <span style="font-size: 12px; color: var(--el-text-color-secondary)">超时(s)</span>
                 </div>
               </template>
             </div>

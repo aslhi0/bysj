@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -57,6 +58,18 @@ DATABASES = {
         'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
+DB_ENGINE = (os.getenv('DJANGO_DB_ENGINE') or '').strip().lower()
+if DB_ENGINE in {'postgres', 'postgresql', 'psql'} or os.getenv('POSTGRES_HOST'):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'HOST': os.getenv('POSTGRES_HOST', '127.0.0.1'),
+            'PORT': int(os.getenv('POSTGRES_PORT', '5432')),
+            'NAME': os.getenv('POSTGRES_DB', 'autotest'),
+            'USER': os.getenv('POSTGRES_USER', 'autotest'),
+            'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'autotest'),
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -74,6 +87,23 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOW_ALL_ORIGINS = os.getenv('DJANGO_CORS_ALLOW_ALL', 'true').lower() in {'1', 'true', 'yes', 'on'}
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': False,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
 
 # Celery 任务调度配置
 CELERY_ALWAYS_EAGER = os.getenv('CELERY_ALWAYS_EAGER', 'false').lower() in {'1', 'true', 'yes', 'on'}

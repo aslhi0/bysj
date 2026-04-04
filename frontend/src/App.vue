@@ -1,8 +1,11 @@
 <script setup>
-import { useRoute } from 'vue-router'
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { HomeFilled, Files, List, Collection, Operation as Odometer, Calendar, Monitor, DataLine } from '@element-plus/icons-vue'
+import { clearTokens, getAccessToken } from './api'
 
 const route = useRoute()
+const router = useRouter()
 
 const menuItems = [
   { path: '/', name: '首页', icon: HomeFilled, label: '概览' },
@@ -13,10 +16,35 @@ const menuItems = [
   { path: '/perf', name: 'perf', icon: DataLine, label: '性能测试' },
   { path: '/envs', name: 'envs', icon: Monitor, label: '环境配置' },
 ]
+
+function parseJwtUsername(token) {
+  try {
+    const p = token.split('.')[1]
+    const json = atob(p.replace(/-/g, '+').replace(/_/g, '/'))
+    const obj = JSON.parse(decodeURIComponent(escape(json)))
+    return obj.username || obj.user || obj.sub || ''
+  } catch {
+    return ''
+  }
+}
+
+const username = computed(() => {
+  const token = getAccessToken()
+  const u = token ? parseJwtUsername(token) : ''
+  return u || 'User'
+})
+
+const isLoginPage = computed(() => route.path === '/login')
+
+function logout() {
+  clearTokens()
+  router.replace('/login')
+}
 </script>
 
 <template>
-  <el-container class="layout-container">
+  <router-view v-if="isLoginPage" />
+  <el-container v-else class="layout-container">
     <el-aside width="220px" class="aside">
       <div class="logo-container">
         <el-icon :size="24" color="#409eff"><Odometer /></el-icon>
@@ -49,12 +77,11 @@ const menuItems = [
           <el-dropdown>
             <span class="user-info">
               <el-avatar :size="32" src="https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png" />
-              <span class="username">Admin</span>
+              <span class="username">{{ username }}</span>
             </span>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item>个人中心</el-dropdown-item>
-                <el-dropdown-item divided>退出登录</el-dropdown-item>
+                <el-dropdown-item divided @click="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>

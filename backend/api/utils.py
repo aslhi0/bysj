@@ -1,7 +1,10 @@
 import requests
 import json
+import logging
 from django.core.mail import send_mail
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 class Notifier:
     @staticmethod
@@ -37,14 +40,14 @@ class Notifier:
                 timeout=10,
             )
             return 200 <= resp.status_code < 300
-        except Exception as e:
-            print(f"发送 webhook 失败: {str(e)}")
+        except Exception:
+            logger.exception("发送 webhook 失败")
             return False
 
     @staticmethod
     def send_email(subject, message, recipient_list):
         if not settings.EMAIL_HOST_USER or 'your-email' in settings.EMAIL_HOST_USER:
-            print("邮件配置未完成，跳过发送")
+            logger.warning("邮件配置未完成，跳过发送")
             return False
         try:
             send_mail(
@@ -55,6 +58,6 @@ class Notifier:
                 fail_silently=False,
             )
             return True
-        except Exception as e:
-            print(f"发送邮件失败: {str(e)}")
+        except Exception:
+            logger.exception("发送邮件失败")
             return False

@@ -8,6 +8,7 @@ from django.conf import settings
 from .models import TestCase, TestSuite, TestRecord, SuiteRun, EnvConfig, PerfRecord
 from .engine import TestEngine
 from .utils import Notifier
+from .crypto_utils import decrypt_json
 
 @shared_task
 def run_test_case_task(case_id, env_id=None, extra_vars=None):
@@ -35,8 +36,8 @@ def run_test_case_task(case_id, env_id=None, extra_vars=None):
                 .first()
             )
         if env is not None:
-            env_vars = env.variables or {}
-            db_config = env.db_config or {}
+            env_vars = decrypt_json(env.variables or {}) if isinstance(env.variables, dict) else (env.variables or {})
+            db_config = decrypt_json(env.db_config or {}) if isinstance(env.db_config, dict) else (env.db_config or {})
             if env.base_url:
                 env_vars['base_url'] = env.base_url
 
@@ -129,8 +130,8 @@ def run_test_suite_task(suite_id, env_id=None, extra_vars=None, stop_on_failure=
                 .first()
             )
         if env is not None:
-            env_vars = env.variables or {}
-            db_config = env.db_config or {}
+            env_vars = decrypt_json(env.variables or {}) if isinstance(env.variables, dict) else (env.variables or {})
+            db_config = decrypt_json(env.db_config or {}) if isinstance(env.db_config, dict) else (env.db_config or {})
             if env.base_url:
                 env_vars['base_url'] = env.base_url
 
