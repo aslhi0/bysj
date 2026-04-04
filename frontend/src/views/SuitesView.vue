@@ -8,6 +8,7 @@ const runLoading = ref(false)
 const suites = ref([])
 const projects = ref([])
 const cases = ref([])
+const envs = ref([])
 const dialogVisible = ref(false)
 const isEdit = ref(false)
 const editId = ref(null)
@@ -29,6 +30,8 @@ const filteredSuites = computed(() => {
 const runDialogVisible = ref(false)
 // ... reactive state ...
 const runTargetId = ref(null)
+const runProjectId = ref(null)
+const selectedEnvId = ref(null)
 const historyDialogVisible = ref(false)
 const historySuiteName = ref('')
 const historyRuns = ref([])
@@ -91,6 +94,11 @@ async function loadCases() {
   cases.value = await res.json()
 }
 
+async function loadEnvs() {
+  const res = await fetch('/api/envs/')
+  envs.value = await res.json()
+}
+
 async function loadSuites() {
   loading.value = true
   try {
@@ -104,7 +112,13 @@ async function loadSuites() {
 onMounted(async () => {
   await loadProjects()
   await loadCases()
+  await loadEnvs()
   loadSuites()
+})
+
+const runEnvs = computed(() => {
+  if (!runProjectId.value) return envs.value
+  return envs.value.filter(e => e.project === runProjectId.value)
 })
 
 function openCreate() {
@@ -195,8 +209,10 @@ async function removeSuite(row) {
   }
 }
 
-function openRunDialog(id) {
-  runTargetId.value = id
+function openRunDialog(row) {
+  runTargetId.value = row.id
+  runProjectId.value = row.project
+  selectedEnvId.value = null
   runForm.variablesJson = '{}'
   runForm.stop_on_failure = false
   runDialogVisible.value = true
@@ -218,6 +234,7 @@ async function submitRun() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         variables,
+        env_id: selectedEnvId.value,
         stop_on_failure: runForm.stop_on_failure,
       }),
     })
@@ -387,7 +404,7 @@ function exportHistoryJson() {
       <el-table-column prop="created_at" label="创建时间" width="180" />
       <el-table-column label="操作" width="400" fixed="right">
         <template #default="{ row }">
-          <el-button type="primary" link :disabled="!suiteCaseCount(row)" @click="openRunDialog(row.id)">
+          <el-button type="primary" link :disabled="!suiteCaseCount(row)" @click="openRunDialog(row)">
             运行套件
           </el-button>
           <el-button type="primary" link @click="openEdit(row)">编辑</el-button>
@@ -502,6 +519,11 @@ function exportHistoryJson() {
 
     <el-dialog v-model="runDialogVisible" title="运行套件" width="480px" destroy-on-close>
       <el-form label-width="120px" v-loading="runLoading">
+        <el-form-item label="执行环境">
+          <el-select v-model="selectedEnvId" clearable placeholder="默认环境(留空)" style="width: 100%">
+            <el-option v-for="e in runEnvs" :key="e.id" :label="e.name" :value="e.id" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="附加变量">
           <el-input v-model="runForm.variablesJson" type="textarea" rows="3" placeholder="{}" />
         </el-form-item>

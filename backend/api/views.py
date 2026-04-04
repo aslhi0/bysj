@@ -200,6 +200,13 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         base_url = None
         if env and env.base_url:
             base_url = env.base_url
+        merged_vars = {}
+        if env and isinstance(env.variables, dict):
+            merged_vars.update(env.variables)
+        if isinstance(case.variables, dict):
+            merged_vars.update(case.variables)
+        if base_url:
+            merged_vars['base_url'] = base_url
         
         # Create PerfRecord
         perf_record = PerfRecord.objects.create(
@@ -212,9 +219,11 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         )
 
         # Generate Locust file (per-record to avoid collisions)
-        locust_code = self.generate_locust_code(case, base_url=base_url)
+        locust_code = self.generate_locust_code(case, base_url=base_url, variables=merged_vars)
         locust_file = f"perf_{perf_record.id}.py"
-        with open(locust_file, 'w', encoding='utf-8') as f:
+        base_dir = str(getattr(settings, 'BASE_DIR', os.getcwd()))
+        locust_path = os.path.join(base_dir, locust_file)
+        with open(locust_path, 'w', encoding='utf-8') as f:
             f.write(locust_code)
 
         # Run Locust in headless mode
@@ -231,47 +240,83 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             'csv_prefix': csv_prefix
         })
 
-    def generate_locust_code(self, case, base_url=None):
-        # 简化版的转换器：将 HTTP 步骤转换为 Locust Task
-        engine = TestEngine(variables={'base_url': base_url, 'base': base_url} if base_url else {})
+    def generate_locust_code(self, case, base_url=None, variables=None):
+        engine_vars = variables if isinstance(variables, dict) else {}
+        if base_url:
+            engine_vars = {**engine_vars, 'base_url': base_url, 'base': base_url}
+        engine = TestEngine(variables=engine_vars)
         tasks = []
         inferred_host = None
-        for step in case.steps:
-            if step.get('type') == 'http':
-                method = step.get('method', 'GET').lower()
-                raw_url = step.get('url', '/')
-                rendered = engine.render_string(raw_url) if isinstance(raw_url, str) else raw_url
-                target = rendered if isinstance(rendered, str) else '/'
-                if target.startswith('http://') or target.startswith('https://'):
-                    u = urlparse(target)
-                    if not inferred_host and u.scheme and u.netloc:
-                        inferred_host = f"{u.scheme}://{u.netloc}"
-                    path = u.path or '/'
-                    if u.query:
-                        path = f"{path}?{u.query}"
-                    target = path
-                if not isinstance(target, str) or not target:
-                    target = '/'
-                if not target.startswith('/'):
-                    target = f"/{target}"
-                tasks.append(f"        self.client.{method}('{target}')")
+        for idx, step in enumerate(case.steps or []):
+            if step.get('type') != 'http':
+                continue
+
+            method = str(step.get('method', 'GET')).upper().strip() or 'GET'
+            raw_url = step.get('url', '/')
+            rendered = engine.render_string(raw_url) if isinstance(raw_url, str) else raw_url
+            target = rendered if isinstance(rendered, str) else '/'
+            if target.startswith('http://') or target.startswith('https://'):
+                u = urlparse(target)
+                if not inferred_host and u.scheme and u.netloc:
+                    inferred_host = f"{u.scheme}://{u.netloc}"
+                path = u.path or '/'
+                if u.query:
+                    path = f"{path}?{u.query}"
+                target = path
+            if not isinstance(target, str) or not target:
+                target = '/'
+            if not target.startswith('/'):
+                target = f"/{target}"
+
+            headers = engine.parse_jsonish(step.get('headers', {}), default={})
+            if not isinstance(headers, dict):
+                headers = {}
+
+            body_raw = step.get('body', '')
+            body_obj = None
+            body_text = None
+            if isinstance(body_raw, (dict, list)):
+                body_obj = engine.render_data(body_raw)
+            elif isinstance(body_raw, str):
+                s = engine.render_string(body_raw)
+                try:
+                    parsed = json.loads(s) if s.strip() else None
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, (dict, list)):
+                    body_obj = engine.render_data(parsed)
+                else:
+                    body_text = s
+
+            kwargs = []
+            if headers:
+                kwargs.append(f"headers={json.dumps(headers, ensure_ascii=False)}")
+            if body_obj is not None:
+                kwargs.append(f"json={json.dumps(body_obj, ensure_ascii=False)}")
+            elif body_text:
+                kwargs.append(f"data={json.dumps(body_text, ensure_ascii=False)}")
+            kwargs.append(f"name={json.dumps(f'{method} {target}', ensure_ascii=False)}")
+
+            kw = (', ' + ', '.join(kwargs)) if kwargs else ''
+            tasks.append(f"        self.client.request({json.dumps(method)}, {json.dumps(target)}{kw})")
         if not tasks:
             tasks = ["        pass"]
 
         host = base_url or inferred_host or 'http://127.0.0.1'
+        safe_host = str(host).replace('"', '\\"')
         
         template = f"""
 from locust import HttpUser, task, between
 
 class QuickstartUser(HttpUser):
-    host = "{host}"
+    host = "{safe_host}"
     wait_time = between(1, 2)
 
     @task
     def functional_case_task(self):
 {chr(10).join(tasks)}
 """
-        return template
+        return template.lstrip()
 
     @action(detail=True, methods=['get'])
     def records(self, request, pk=None):
@@ -633,6 +678,15 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PerfRecordSerializer
     permission_classes = [ApiKeyOrReadOnly]
 
+    def sanitize_filename(self, value, default='record'):
+        s = '' if value is None else str(value)
+        if not s.strip():
+            return default
+        for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\r', '\n']:
+            s = s.replace(ch, '_')
+        s = s.strip()
+        return s or default
+
     def read_csv_rows(self, file_path):
         rows = []
         if not os.path.exists(file_path):
@@ -750,6 +804,31 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'history': os.path.exists(history_path),
             },
         })
+
+    @action(detail=True, methods=['get'])
+    def locust(self, request, pk=None):
+        perf_record = self.get_object()
+        case = perf_record.case
+        env = (
+            EnvConfig.objects.filter(project=case.project, is_default=True)
+            .order_by('-created_at')
+            .first()
+        )
+        base_url = env.base_url if env and env.base_url else None
+
+        merged_vars = {}
+        if env and isinstance(env.variables, dict):
+            merged_vars.update(env.variables)
+        if isinstance(case.variables, dict):
+            merged_vars.update(case.variables)
+        if base_url:
+            merged_vars['base_url'] = base_url
+
+        code = TestCaseViewSet().generate_locust_code(case, base_url=base_url, variables=merged_vars)
+        filename = f"locust_perf_{perf_record.id}_{self.sanitize_filename(case.title, default='case')}.py"
+        resp = HttpResponse(code, content_type='text/x-python; charset=utf-8')
+        resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return resp
 
 @api_view(['GET'])
 def task_status(request, task_id):

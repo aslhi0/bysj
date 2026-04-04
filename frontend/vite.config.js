@@ -20,12 +20,12 @@ export default defineConfig({
     proxy: {
       // 开发环境统一走相对路径 /api/*，避免浏览器跨域与 CSRF 复杂度
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
         secure: false,
       },
       '/media': {
-        target: 'http://127.0.0.1:8000',
+        target: process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,
         secure: false,
       },

@@ -1,7 +1,13 @@
 from unittest import TestCase
 from unittest.mock import patch
 
+from django.test import TestCase as DjangoTestCase
+from rest_framework.test import APIRequestFactory
+
+from .models import Project, EnvConfig, TestCase as DbTestCase, TestSuite as DbTestSuite, PerfRecord
 from .engine import TestEngine
+from .tasks import run_test_case_task, run_test_suite_task
+from .views import PerfRecordViewSet
 
 class FakeResponse:
     def __init__(self, status_code=200, json_data=None, headers=None):
@@ -59,3 +65,145 @@ class TestEngineHttp(TestCase):
     def test_bracket_placeholder_is_supported(self):
         engine = TestEngine(variables={'base_url': 'https://example.com'})
         self.assertEqual(engine.render_string('[[base_url]]/uuid'), 'https://example.com/uuid')
+
+
+class TestIntegrationTasks(DjangoTestCase):
+    def test_run_test_case_task_creates_record_and_renders_variables(self):
+        project = Project.objects.create(name='p1')
+        env = EnvConfig.objects.create(
+            project=project,
+            name='env',
+            base_url='https://httpbin.org',
+            variables={},
+            is_default=True,
+        )
+        case = DbTestCase.objects.create(
+            project=project,
+            title='case',
+            status='active',
+            steps=[
+                {
+                    'type': 'http',
+                    'method': 'GET',
+                    'url': '{{base_url}}/uuid',
+                    'headers': {},
+                    'body': '',
+                    'capture': {'sys_uuid': {'from': 'json', 'path': 'uuid'}},
+                    'assertions': [{'source': 'status_code', 'operator': 'eq', 'expected': '200'}],
+                },
+                {
+                    'type': 'http',
+                    'method': 'GET',
+                    'url': '{{base_url}}/get?tag={{sys_uuid}}',
+                    'headers': {},
+                    'body': '',
+                    'capture': {},
+                    'assertions': [{'source': 'status_code', 'operator': 'eq', 'expected': '200'}],
+                },
+            ],
+        )
+
+        called_urls = []
+
+        def fake_request(method, url, **kwargs):
+            called_urls.append(url)
+            if url.endswith('/uuid'):
+                return FakeResponse(status_code=200, json_data={'uuid': 'u-1'})
+            return FakeResponse(status_code=200, json_data={})
+
+        with patch('api.engine.requests.request', side_effect=fake_request):
+            result = run_test_case_task(case.id, env.id, {})
+
+        self.assertEqual(result.get('status'), 'success')
+        self.assertTrue(result.get('record_id'))
+        self.assertEqual(len(called_urls), 2)
+        self.assertIn('tag=u-1', called_urls[1])
+
+    def test_run_test_suite_task_propagates_variables_across_cases(self):
+        project = Project.objects.create(name='p1')
+        env = EnvConfig.objects.create(
+            project=project,
+            name='env',
+            base_url='https://httpbin.org',
+            variables={},
+            is_default=True,
+        )
+
+        case1 = DbTestCase.objects.create(
+            project=project,
+            title='c1',
+            status='active',
+            steps=[
+                {
+                    'type': 'http',
+                    'method': 'GET',
+                    'url': '{{base_url}}/uuid',
+                    'headers': {},
+                    'body': '',
+                    'capture': {'sys_uuid': {'from': 'json', 'path': 'uuid'}},
+                    'assertions': [{'source': 'status_code', 'operator': 'eq', 'expected': '200'}],
+                },
+            ],
+        )
+        case2 = DbTestCase.objects.create(
+            project=project,
+            title='c2',
+            status='active',
+            steps=[
+                {
+                    'type': 'http',
+                    'method': 'GET',
+                    'url': '{{base_url}}/get?tag={{sys_uuid}}',
+                    'headers': {},
+                    'body': '',
+                    'capture': {},
+                    'assertions': [{'source': 'status_code', 'operator': 'eq', 'expected': '200'}],
+                },
+            ],
+        )
+        suite = DbTestSuite.objects.create(
+            project=project,
+            name='s1',
+            ordered_case_ids=[case1.id, case2.id],
+        )
+
+        called_urls = []
+
+        def fake_request(method, url, **kwargs):
+            called_urls.append(url)
+            if url.endswith('/uuid'):
+                return FakeResponse(status_code=200, json_data={'uuid': 'u-2'})
+            return FakeResponse(status_code=200, json_data={})
+
+        with patch('api.engine.requests.request', side_effect=fake_request):
+            result = run_test_suite_task(suite.id, env.id, {}, stop_on_failure=False)
+
+        self.assertTrue(result.get('suite_run_id'))
+        self.assertEqual(result.get('summary', {}).get('total'), 2)
+        self.assertEqual(len(called_urls), 2)
+        self.assertIn('tag=u-2', called_urls[1])
+
+    def test_perf_record_locust_endpoint_returns_script(self):
+        project = Project.objects.create(name='p1')
+        EnvConfig.objects.create(
+            project=project,
+            name='env',
+            base_url='https://httpbin.org',
+            variables={},
+            is_default=True,
+        )
+        case = DbTestCase.objects.create(
+            project=project,
+            title='case',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '{{base_url}}/get', 'headers': {}, 'body': ''}],
+        )
+        perf = PerfRecord.objects.create(case=case, users=1, spawn_rate=1, duration='1s', status='running', csv_prefix='')
+
+        factory = APIRequestFactory()
+        req = factory.get(f'/api/perf-records/{perf.id}/locust/')
+        resp = PerfRecordViewSet.as_view({'get': 'locust'})(req, pk=str(perf.id))
+
+        self.assertEqual(resp.status_code, 200)
+        content = resp.content.decode('utf-8', 'ignore')
+        self.assertIn('from locust import HttpUser', content)

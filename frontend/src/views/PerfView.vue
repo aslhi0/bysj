@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
-import { Monitor, DataLine, Loading } from '@element-plus/icons-vue'
+import { Monitor, DataLine, Loading, Download } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 
@@ -87,6 +87,35 @@ async function openReport(row) {
     reportLoading.value = false
   }
 }
+
+function locustDownloadFilename(row) {
+  const raw = String(row.case_title || 'case')
+    .replace(/[/\\:*?"<>|\r\n]+/g, '_')
+    .trim() || 'case'
+  const short = raw.length > 120 ? raw.slice(0, 120) : raw
+  return `locust_perf_${row.id}_${short}.py`
+}
+
+async function downloadLocust(row) {
+  try {
+    const res = await fetch(`/api/perf-records/${row.id}/locust/`)
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      ElMessage.error(data.detail || '下载失败')
+      return
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = locustDownloadFilename(row)
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('已下载 Locust 脚本')
+  } catch (e) {
+    ElMessage.error(String(e))
+  }
+}
 </script>
 
 <template>
@@ -114,10 +143,13 @@ async function openReport(row) {
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="开始时间" width="180" />
-      <el-table-column label="结果报告" width="150" fixed="right">
+      <el-table-column label="结果/脚本" width="220" fixed="right">
         <template #default="{ row }">
           <el-button type="success" link :disabled="row.status === 'running'" @click="openReport(row)">
             <el-icon><DataLine /></el-icon> 查看报告 (CSV)
+          </el-button>
+          <el-button type="primary" link @click="downloadLocust(row)">
+            <el-icon><Download /></el-icon> 下载 Locust
           </el-button>
         </template>
       </el-table-column>
