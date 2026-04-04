@@ -1,11 +1,24 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
 
 const loading = ref(false)
 const rows = ref([])
 const dialogVisible = ref(false)
-const form = reactive({ name: '', description: '' })
+const isEdit = ref(false)
+const editId = ref(null)
+const searchQuery = ref('')
+const form = reactive({ name: '', description: '', webhook_url: '' })
+
+const filteredRows = computed(() => {
+  if (!searchQuery.value) return rows.value
+  const q = searchQuery.value.toLowerCase()
+  return rows.value.filter(r => 
+    r.name.toLowerCase().includes(q) || 
+    (r.description && r.description.toLowerCase().includes(q))
+  )
+})
 
 async function load() {
   loading.value = true
@@ -20,8 +33,20 @@ async function load() {
 onMounted(load)
 
 function openCreate() {
+  isEdit.value = false
+  editId.value = null
   form.name = ''
   form.description = ''
+  form.webhook_url = ''
+  dialogVisible.value = true
+}
+
+function openEdit(row) {
+  isEdit.value = true
+  editId.value = row.id
+  form.name = row.name
+  form.description = row.description
+  form.webhook_url = row.webhook_url || ''
   dialogVisible.value = true
 }
 
@@ -30,19 +55,24 @@ async function submit() {
     ElMessage.warning('请填写项目名称')
     return
   }
-  const res = await fetch('/api/projects/', {
-    method: 'POST',
+  
+  const url = isEdit.value ? `/api/projects/${editId.value}/` : '/api/projects/'
+  const method = isEdit.value ? 'PUT' : 'POST'
+
+  const res = await fetch(url, {
+    method: method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       name: form.name.trim(),
       description: form.description.trim(),
+      webhook_url: form.webhook_url.trim(),
     }),
   })
   if (!res.ok) {
-    ElMessage.error('创建失败')
+    ElMessage.error(isEdit.value ? '修改失败' : '创建失败')
     return
   }
-  ElMessage.success('已创建')
+  ElMessage.success(isEdit.value ? '已修改' : '已创建')
   dialogVisible.value = false
   load()
 }
@@ -63,28 +93,47 @@ async function removeRow(row) {
 
 <template>
   <div>
-    <div style="margin-bottom: 16px">
+    <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; max-width: 960px">
       <el-button type="primary" @click="openCreate">新建项目</el-button>
+      <el-input
+        v-model="searchQuery"
+        placeholder="搜索项目名称或描述..."
+        clearable
+        style="width: 280px"
+      >
+        <template #prefix>
+          <el-icon><Search /></el-icon>
+        </template>
+      </el-input>
     </div>
-    <el-table v-loading="loading" :data="rows" stripe style="width: 100%; max-width: 960px">
+    
+    <el-table v-loading="loading" :data="filteredRows" stripe style="width: 100%; max-width: 960px">
       <el-table-column prop="id" label="ID" width="70" />
-      <el-table-column prop="name" label="名称" min-width="160" />
+      <el-table-column prop="name" label="名称" min-width="160">
+        <template #default="{ row }">
+          <span style="font-weight: bold; color: var(--el-color-primary)">{{ row.name }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="description" label="描述" min-width="200" show-overflow-tooltip />
       <el-table-column prop="created_at" label="创建时间" width="180" />
-      <el-table-column label="操作" width="100" fixed="right">
+      <el-table-column label="操作" width="140" fixed="right">
         <template #default="{ row }">
+          <el-button type="primary" link @click="openEdit(row)">编辑</el-button>
           <el-button type="danger" link @click="removeRow(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="dialogVisible" title="新建项目" width="480px" destroy-on-close>
-      <el-form label-width="80px">
+    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑项目' : '新建项目'" width="480px" destroy-on-close>
+      <el-form label-width="100px">
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="例如：电商回归" />
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" rows="3" />
+          <el-input v-model="form.description" type="textarea" rows="2" />
+        </el-form-item>
+        <el-form-item label="Webhook">
+          <el-input v-model="form.webhook_url" placeholder="钉钉/企微机器人地址" />
         </el-form-item>
       </el-form>
       <template #footer>

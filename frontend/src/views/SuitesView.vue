@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
 
 const loading = ref(false)
 const runLoading = ref(false)
@@ -8,12 +9,36 @@ const suites = ref([])
 const projects = ref([])
 const cases = ref([])
 const dialogVisible = ref(false)
+const isEdit = ref(false)
+const editId = ref(null)
+const searchQuery = ref('')
+const filterProject = ref(null)
+
+const filteredSuites = computed(() => {
+  let result = suites.value
+  if (filterProject.value) {
+    result = result.filter(s => s.project === filterProject.value)
+  }
+  if (searchQuery.value) {
+    const q = searchQuery.value.toLowerCase()
+    result = result.filter(s => s.name.toLowerCase().includes(q))
+  }
+  return result
+})
+
 const runDialogVisible = ref(false)
+// ... reactive state ...
 const runTargetId = ref(null)
 const historyDialogVisible = ref(false)
 const historySuiteName = ref('')
 const historyRuns = ref([])
 const historyLoading = ref(false)
+
+const runForm = reactive({
+  variablesJson: '{}',
+  stop_on_failure: false,
+})
+
 const form = reactive({
   project: null,
   name: '',
@@ -21,10 +46,30 @@ const form = reactive({
   variablesJson: '{}',
   caseIdsText: '',
 })
-const runForm = reactive({
-  variablesJson: '{}',
-  stop_on_failure: false,
+
+const selectCasesVisible = ref(false)
+const selectedCaseIds = ref([])
+
+const projectCases = computed(() => {
+  if (!form.project) return []
+  return cases.value.filter(c => c.project === form.project)
 })
+
+function openSelectCases() {
+  if (!form.project) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+  selectedCaseIds.value = parseOrderedIds(form.caseIdsText)
+  selectCasesVisible.value = true
+}
+
+function confirmSelectCases() {
+  form.caseIdsText = selectedCaseIds.value.join('\n')
+  selectCasesVisible.value = false
+}
+
+// ... other state ...
 
 const projectOptions = computed(() =>
   projects.value.map((p) => ({ label: p.name, value: p.id })),
@@ -63,11 +108,24 @@ onMounted(async () => {
 })
 
 function openCreate() {
+  isEdit.value = false
+  editId.value = null
   form.project = projectOptions.value[0]?.value ?? null
   form.name = ''
   form.description = ''
   form.variablesJson = '{}'
   form.caseIdsText = ''
+  dialogVisible.value = true
+}
+
+function openEdit(row) {
+  isEdit.value = true
+  editId.value = row.id
+  form.project = row.project
+  form.name = row.name
+  form.description = row.description
+  form.variablesJson = JSON.stringify(row.variables || {}, null, 2)
+  form.caseIdsText = (row.ordered_case_ids || []).join('\n')
   dialogVisible.value = true
 }
 
@@ -101,8 +159,12 @@ async function submitSuite() {
     ElMessage.warning('请至少填写一个用例 ID（每行一个）')
     return
   }
-  const res = await fetch('/api/suites/', {
-    method: 'POST',
+
+  const url = isEdit.value ? `/api/suites/${editId.value}/` : '/api/suites/'
+  const method = isEdit.value ? 'PUT' : 'POST'
+
+  const res = await fetch(url, {
+    method: method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       project: form.project,
@@ -114,10 +176,10 @@ async function submitSuite() {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
-    ElMessage.error(typeof err.detail === 'string' ? err.detail : JSON.stringify(err) || '创建失败')
+    ElMessage.error(typeof err.detail === 'string' ? err.detail : JSON.stringify(err) || (isEdit.value ? '修改失败' : '创建失败'))
     return
   }
-  ElMessage.success('套件已创建')
+  ElMessage.success(isEdit.value ? '套件已更新' : '套件已创建')
   dialogVisible.value = false
   loadSuites()
 }
@@ -148,6 +210,7 @@ async function submitRun() {
     ElMessage.error('变量须为合法 JSON 对象')
     return
   }
+  let startedPolling = false
   runLoading.value = true
   try {
     const res = await fetch(`/api/suites/${runTargetId.value}/run/`, {
@@ -163,19 +226,57 @@ async function submitRun() {
       ElMessage.error(data.detail || '执行失败')
       return
     }
-    const { summary, suite_run_id: srid } = data
-    ElNotification({
-      title: '套件执行完成',
-      message: `记录 #${srid} · 共 ${summary.total} 条 · 通过 ${summary.passed} · 失败 ${summary.failed}`,
-      type: summary.failed ? 'warning' : 'success',
-      duration: 8000,
-    })
-    runDialogVisible.value = false
+    if (data.status === 'pending' && data.task_id) {
+      ElMessage.info('任务已提交，后台执行中...')
+      runDialogVisible.value = false
+      startedPolling = true
+      pollTaskStatus(data.task_id)
+      return
+    }
+    ElMessage.success('已触发执行')
   } catch (e) {
     ElMessage.error(String(e))
   } finally {
-    runLoading.value = false
+    if (!startedPolling) runLoading.value = false
   }
+}
+
+async function pollTaskStatus(taskId) {
+  const timer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/task-status/${taskId}/`)
+      const data = await res.json().catch(() => ({}))
+      if (!data.ready) return
+      clearInterval(timer)
+      runLoading.value = false
+
+      const result = data.result || {}
+      const summary = result.summary || {}
+      if (result.status === 'error') {
+        ElMessage.error(result.message || '套件执行异常')
+        return
+      }
+      if (typeof summary.total === 'number') {
+        ElNotification({
+          title: '套件执行完成',
+          message: `记录 #${result.suite_run_id} · 共 ${summary.total} 条 · 通过 ${summary.passed} · 失败 ${summary.failed}`,
+          type: summary.failed ? 'warning' : 'success',
+          duration: 8000,
+        })
+      } else {
+        ElNotification({
+          title: '套件执行完成',
+          message: `记录 #${result.suite_run_id || '-'} · 已完成`,
+          type: 'success',
+          duration: 6000,
+        })
+      }
+      loadSuites()
+    } catch {
+      clearInterval(timer)
+      runLoading.value = false
+    }
+  }, 2000)
 }
 
 function suiteCaseCount(row) {
@@ -241,27 +342,55 @@ function exportHistoryJson() {
 
 <template>
   <div>
-    <div style="margin-bottom: 16px">
-      <el-button type="primary" @click="openCreate">新建套件</el-button>
-      <span v-if="!projectOptions.length" style="margin-left: 12px; color: var(--el-color-warning)">
-        请先在「测试项目」中创建项目
-      </span>
+    <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-start; max-width: 960px">
+      <div>
+        <el-button type="primary" @click="openCreate">新建套件</el-button>
+        <span v-if="!projectOptions.length" style="margin-left: 12px; color: var(--el-color-warning)">
+          请先在「测试项目」中创建项目
+        </span>
+      </div>
+      <div style="display: flex; gap: 12px">
+        <el-select v-model="filterProject" placeholder="按项目筛选" clearable style="width: 180px">
+          <el-option
+            v-for="opt in projectOptions"
+            :key="opt.value"
+            :label="opt.label"
+            :value="opt.value"
+          />
+        </el-select>
+        <el-input
+          v-model="searchQuery"
+          placeholder="搜索套件名称..."
+          clearable
+          style="width: 240px"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+      </div>
     </div>
-    <el-table v-loading="loading" :data="suites" stripe style="width: 100%; max-width: 960px">
+    
+    <el-table v-loading="loading || runLoading" :data="filteredSuites" stripe style="width: 100%; max-width: 960px">
       <el-table-column prop="id" label="ID" width="70" />
-      <el-table-column prop="name" label="套件名称" min-width="140" />
+      <el-table-column prop="name" label="套件名称" min-width="140">
+        <template #default="{ row }">
+          <span style="font-weight: 500">{{ row.name }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="project_name" label="项目" width="120" />
       <el-table-column label="用例数" width="90">
         <template #default="{ row }">
-          {{ suiteCaseCount(row) }}
+          <el-tag size="small" type="info">{{ suiteCaseCount(row) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="180" />
-      <el-table-column label="操作" width="360" fixed="right">
+      <el-table-column label="操作" width="400" fixed="right">
         <template #default="{ row }">
           <el-button type="primary" link :disabled="!suiteCaseCount(row)" @click="openRunDialog(row.id)">
             运行套件
           </el-button>
+          <el-button type="primary" link @click="openEdit(row)">编辑</el-button>
           <el-button type="success" link @click="downloadLocust(row)">
             导出 Locust
           </el-button>
@@ -271,7 +400,7 @@ function exportHistoryJson() {
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="dialogVisible" title="新建测试套件" width="560px" destroy-on-close>
+    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑测试套件' : '新建测试套件'" width="560px" destroy-on-close>
       <el-form label-width="100px">
         <el-form-item label="项目" required>
           <el-select v-model="form.project" placeholder="选择项目" style="width: 100%">
@@ -293,18 +422,39 @@ function exportHistoryJson() {
           <el-input v-model="form.variablesJson" type="textarea" rows="2" placeholder="{}" />
         </el-form-item>
         <el-form-item label="用例顺序" required>
-          <el-input
-            v-model="form.caseIdsText"
-            type="textarea"
-            rows="6"
-            placeholder="每行一个用例 ID，自上而下为执行顺序"
-          />
+          <div style="display: flex; gap: 8px; align-items: flex-start; width: 100%">
+            <el-input
+              v-model="form.caseIdsText"
+              type="textarea"
+              rows="6"
+              placeholder="每行一个用例 ID，自上而下为执行顺序"
+              style="flex: 1"
+            />
+            <el-button type="primary" plain @click="openSelectCases">从列表中选择</el-button>
+          </div>
           <div class="hint">当前项目用例参考：<pre>{{ caseIdHint }}</pre></div>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submitSuite">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 选择用例弹窗 -->
+    <el-dialog v-model="selectCasesVisible" title="从项目中选择用例" width="500px">
+      <el-checkbox-group v-model="selectedCaseIds" style="max-height: 400px; overflow-y: auto">
+        <div v-for="c in projectCases" :key="c.id" style="margin-bottom: 8px">
+          <el-checkbox :value="c.id" border style="width: 100%; margin-right: 0">
+            <span style="margin-right: 8px; color: var(--el-text-color-secondary)">#{{ c.id }}</span>
+            {{ c.title }}
+          </el-checkbox>
+        </div>
+      </el-checkbox-group>
+      <el-empty v-if="!projectCases.length" description="该项目下暂无用例" />
+      <template #footer>
+        <el-button @click="selectCasesVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmSelectCases">确定</el-button>
       </template>
     </el-dialog>
 
@@ -350,7 +500,7 @@ function exportHistoryJson() {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="runDialogVisible" title="运行套件（同步）" width="480px" destroy-on-close>
+    <el-dialog v-model="runDialogVisible" title="运行套件" width="480px" destroy-on-close>
       <el-form label-width="120px" v-loading="runLoading">
         <el-form-item label="附加变量">
           <el-input v-model="runForm.variablesJson" type="textarea" rows="3" placeholder="{}" />

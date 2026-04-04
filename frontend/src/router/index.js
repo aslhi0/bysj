@@ -21,6 +21,21 @@ const routes = [
     name: 'suites',
     component: () => import('../views/SuitesView.vue'),
   },
+  {
+    path: '/envs',
+    name: 'envs',
+    component: () => import('../views/EnvsView.vue'),
+  },
+  {
+    path: '/schedules',
+    name: 'schedules',
+    component: () => import('../views/SchedulesView.vue'),
+  },
+  {
+    path: '/perf',
+    name: 'perf',
+    component: () => import('../views/PerfView.vue'),
+  },
 ]
 
 export default createRouter({
