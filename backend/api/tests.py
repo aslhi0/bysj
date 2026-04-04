@@ -895,7 +895,7 @@ class TestViewSetIntegration(DjangoTestCase):
         factory = APIRequestFactory()
         req = factory.post(f'/api/cases/{case.id}/run/', {}, format='json')
         force_authenticate(req, user=user)
-        with patch('api.views.run_test_case_task') as m_task:
+        with patch('api.views_cases_suites.run_test_case_task') as m_task:
             m_task.delay.return_value = MagicMock(id='fake-task-id')
             resp = api_views.TestCaseViewSet.as_view({'post': 'run'})(req, pk=str(case.id))
         self.assertEqual(resp.status_code, 200)
@@ -959,3 +959,55 @@ class TestViewSetIntegration(DjangoTestCase):
         resp = api_views.TestCaseViewSet.as_view({'get': 'records'})(req, pk=str(case.id))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 1)
+
+    def test_import_openapi_creates_cases(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('io1', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        payload = {
+            'project': project.id,
+            'spec': {
+                'openapi': '3.0.0',
+                'paths': {
+                    '/users': {
+                        'get': {'summary': 'List users'},
+                        'post': {'summary': 'Create user'},
+                    },
+                },
+            },
+        }
+        factory = APIRequestFactory()
+        req = factory.post('/api/cases/import-openapi/', payload, format='json')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'import_openapi'})(req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get('count'), 2)
+        self.assertTrue(DbTestCase.objects.filter(project=project, title__icontains='GET /users').exists())
+
+    def test_import_openapi_rejects_invalid_paths_shape(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('io2', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        payload = {'project': project.id, 'spec': {'openapi': '3.0.0', 'paths': []}}
+        factory = APIRequestFactory()
+        req = factory.post('/api/cases/import-openapi/', payload, format='json')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'import_openapi'})(req)
+        self.assertEqual(resp.status_code, 400)
+
+    def test_import_openapi_rejects_oversized_yaml(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('io3', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        payload = {'project': project.id, 'spec_yaml': 'a' * 1_500_001}
+        factory = APIRequestFactory()
+        req = factory.post('/api/cases/import-openapi/', payload, format='json')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'import_openapi'})(req)
+        self.assertEqual(resp.status_code, 400)
