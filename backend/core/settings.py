@@ -4,9 +4,12 @@ from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-test-key')
+_DEFAULT_SECRET_KEY = 'django-insecure-dev-only'
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', _DEFAULT_SECRET_KEY)
 DEBUG = os.getenv('DJANGO_DEBUG', 'true').lower() in {'1', 'true', 'yes', 'on'}
-ALLOWED_HOSTS = [h.strip() for h in os.getenv('DJANGO_ALLOWED_HOSTS', '*').split(',') if h.strip()]
+if not DEBUG and SECRET_KEY == _DEFAULT_SECRET_KEY:
+    raise RuntimeError('生产环境必须设置 DJANGO_SECRET_KEY')
+ALLOWED_HOSTS = [h.strip() for h in os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h.strip()]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -86,7 +89,11 @@ USE_TZ = True
 STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CORS_ALLOW_ALL_ORIGINS = os.getenv('DJANGO_CORS_ALLOW_ALL', 'true').lower() in {'1', 'true', 'yes', 'on'}
+_cors_all = os.getenv('DJANGO_CORS_ALLOW_ALL')
+if _cors_all is None:
+    CORS_ALLOW_ALL_ORIGINS = bool(DEBUG)
+else:
+    CORS_ALLOW_ALL_ORIGINS = _cors_all.lower() in {'1', 'true', 'yes', 'on'}
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -95,6 +102,18 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_THROTTLE_CLASSES': (
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ),
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/min',
+        'user': '300/min',
+        'register': '5/min',
+        'login': '10/min',
+        'token_refresh': '30/min',
+    },
 }
 
 SIMPLE_JWT = {

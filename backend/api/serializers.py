@@ -6,17 +6,56 @@ from .crypto_utils import encrypt_json, decrypt_json, mask_json, merge_masked
 class CrontabScheduleSerializer(serializers.ModelSerializer):
     class Meta:
         model = CrontabSchedule
-        fields = '__all__'
+        fields = [
+            'id',
+            'minute',
+            'hour',
+            'day_of_week',
+            'day_of_month',
+            'month_of_year',
+            'timezone',
+        ]
 
 class PeriodicTaskSerializer(serializers.ModelSerializer):
     class Meta:
         model = PeriodicTask
-        fields = '__all__'
+        fields = [
+            'id',
+            'name',
+            'task',
+            'crontab',
+            'enabled',
+            'args',
+            'kwargs',
+            'description',
+            'last_run_at',
+            'total_run_count',
+            'date_changed',
+        ]
+        read_only_fields = [
+            'task',
+            'args',
+            'kwargs',
+            'description',
+            'last_run_at',
+            'total_run_count',
+            'date_changed',
+        ]
 
 class EnvConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = EnvConfig
-        fields = '__all__'
+        fields = [
+            'id',
+            'project',
+            'name',
+            'base_url',
+            'db_config',
+            'variables',
+            'is_default',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
     
     def validate_db_config(self, value):
         if value is None:
@@ -71,12 +110,27 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = '__all__'
+        read_only_fields = ['owner', 'created_at']
 
 class TestCaseSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
     class Meta:
         model = TestCase
-        fields = '__all__'
+        fields = [
+            'id',
+            'project',
+            'project_name',
+            'title',
+            'steps',
+            'variables',
+            'tags',
+            'setup_sql',
+            'teardown_sql',
+            'status',
+            'updated_at',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'project_name', 'updated_at', 'created_at']
     
     def validate_project(self, value):
         req = self.context.get('request')
@@ -144,7 +198,18 @@ class TestSuiteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TestSuite
-        fields = '__all__'
+        fields = [
+            'id',
+            'project',
+            'project_name',
+            'name',
+            'description',
+            'variables',
+            'ordered_case_ids',
+            'cases_summary',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'project_name', 'cases_summary', 'created_at']
 
     def get_cases_summary(self, obj):
         ids = obj.ordered_case_ids or []
@@ -183,21 +248,60 @@ class TestRecordSerializer(serializers.ModelSerializer):
     case_title = serializers.CharField(source='case.title', read_only=True)
     class Meta:
         model = TestRecord
-        fields = '__all__'
+        fields = [
+            'id',
+            'case',
+            'case_title',
+            'status',
+            'result_log',
+            'step_results',
+            'screenshot',
+            'elapsed_time',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'case_title', 'created_at']
 
 class SuiteRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = SuiteRun
-        fields = '__all__'
+        fields = [
+            'id',
+            'suite',
+            'summary',
+            'stop_on_failure',
+            'results',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
 
 class PerfRecordSerializer(serializers.ModelSerializer):
     case_title = serializers.CharField(source='case.title', read_only=True)
     class Meta:
         model = PerfRecord
-        fields = '__all__'
+        fields = [
+            'id',
+            'case',
+            'case_title',
+            'users',
+            'spawn_rate',
+            'duration',
+            'status',
+            'csv_prefix',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'case_title', 'csv_prefix', 'created_at']
 
 class TestCaseVersionSerializer(serializers.ModelSerializer):
     created_by_username = serializers.CharField(source='created_by.username', read_only=True)
     class Meta:
         model = TestCaseVersion
-        fields = '__all__'
+        fields = [
+            'id',
+            'case',
+            'version',
+            'snapshot',
+            'created_by',
+            'created_by_username',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_by_username', 'created_at']

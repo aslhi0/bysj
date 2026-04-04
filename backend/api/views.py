@@ -12,13 +12,17 @@ from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.conf import settings
 from django.http import HttpResponse
-from celery import current_app
-from rest_framework import viewsets, status
+from django.db.models import Q
+from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action, api_view
 from rest_framework.permissions import BasePermission, SAFE_METHODS, IsAuthenticated, AllowAny
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import permission_classes
 from rest_framework.response import Response
 from celery.result import AsyncResult
+from rest_framework.views import APIView
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .models import Project, TestCase, TestSuite, TestRecord, SuiteRun, EnvConfig, PerfRecord, TestCaseVersion
 from django_celery_beat.models import PeriodicTask, CrontabSchedule
 from .serializers import (
@@ -27,7 +31,7 @@ from .serializers import (
     PeriodicTaskSerializer, CrontabScheduleSerializer, PerfRecordSerializer,
     TestCaseVersionSerializer
 )
-from .engine import TestEngine
+from .engine import TestEngine, validate_outbound_http_url
 from .tasks import run_test_case_task, run_test_suite_task, run_perf_test_task
 from .crypto_utils import decrypt_json
 
@@ -74,7 +78,13 @@ class CrontabScheduleViewSet(viewsets.ModelViewSet):
     serializer_class = CrontabScheduleSerializer
     permission_classes = [IsAuthenticated]
 
-class PeriodicTaskViewSet(viewsets.ModelViewSet):
+class PeriodicTaskViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    mixins.DestroyModelMixin,
+    viewsets.GenericViewSet,
+):
     queryset = PeriodicTask.objects.all()
     serializer_class = PeriodicTaskSerializer
     permission_classes = [IsAuthenticated]
@@ -83,49 +93,25 @@ class PeriodicTaskViewSet(viewsets.ModelViewSet):
         qs = super().get_queryset()
         oid = getattr(self.request.user, 'id', None)
         if oid:
-            qs = qs.filter(description__contains=f'"owner_id": {oid}')
+            qs = qs.filter(
+                Q(description__contains=f'"owner_id": {oid}')
+                | Q(description__contains=f'"owner_id":{oid}')
+            )
         return qs
-    
-    def normalize_description(self, description):
+
+    def get_object(self):
+        obj = super().get_object()
         oid = getattr(self.request.user, 'id', None)
         if not oid:
-            return description
-        s = '' if description is None else str(description)
-        if f'"owner_id": {oid}' in s:
-            return s
-        if not s.strip():
-            return json.dumps({'owner_id': oid}, ensure_ascii=False)
+            raise PermissionDenied('未登录')
         try:
-            obj = json.loads(s)
-            if isinstance(obj, dict):
-                obj['owner_id'] = oid
-                return json.dumps(obj, ensure_ascii=False)
+            d = json.loads(obj.description or '{}')
         except Exception:
-            pass
-        return json.dumps({'owner_id': oid, 'note': s}, ensure_ascii=False)
-    
-    def perform_create(self, serializer):
-        serializer.save(description=self.normalize_description(self.request.data.get('description')))
-    
-    def perform_update(self, serializer):
-        serializer.save(description=self.normalize_description(self.request.data.get('description')))
-
-    @action(detail=True, methods=['post'])
-    def trigger(self, request, pk=None):
-        pt = self.get_object()
-        try:
-            args = json.loads(pt.args or '[]')
-        except Exception:
-            args = []
-        try:
-            kwargs = json.loads(pt.kwargs or '{}')
-        except Exception:
-            kwargs = {}
-        try:
-            async_result = current_app.send_task(pt.task, args=args, kwargs=kwargs)
-            return Response({'task_id': async_result.id, 'message': '已触发执行'})
-        except Exception as e:
-            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            d = {}
+        owner_id = d.get('owner_id') if isinstance(d, dict) else None
+        if owner_id != oid:
+            raise PermissionDenied('无权限访问该定时任务')
+        return obj
 
 class ProjectViewSet(viewsets.ModelViewSet):
     queryset = Project.objects.all()
@@ -371,6 +357,34 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         if base_url:
             merged_vars['base_url'] = base_url
         
+        try:
+            users = int(users)
+        except Exception:
+            users = 10
+        try:
+            spawn_rate = int(spawn_rate)
+        except Exception:
+            spawn_rate = 1
+        if users < 1 or users > 200:
+            return Response({'detail': 'users 超出范围（1-200）'}, status=status.HTTP_400_BAD_REQUEST)
+        if spawn_rate < 1 or spawn_rate > 50:
+            return Response({'detail': 'spawn_rate 超出范围（1-50）'}, status=status.HTTP_400_BAD_REQUEST)
+        duration_s = str(duration).strip().lower()
+        m = None
+        try:
+            import re as _re
+            m = _re.fullmatch(r'(\d+)\s*([smh]?)', duration_s)
+        except Exception:
+            m = None
+        if not m:
+            return Response({'detail': 'duration 格式不合法（如 60s / 5m / 1h）'}, status=status.HTTP_400_BAD_REQUEST)
+        n = int(m.group(1))
+        unit = m.group(2) or 's'
+        seconds = n * (3600 if unit == 'h' else 60 if unit == 'm' else 1)
+        if seconds < 1 or seconds > 600:
+            return Response({'detail': 'duration 超出范围（1-600s）'}, status=status.HTTP_400_BAD_REQUEST)
+        duration = f'{seconds}s'
+
         # Create PerfRecord
         perf_record = PerfRecord.objects.create(
             case=case,
@@ -381,11 +395,11 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             status='running'
         )
 
-        # Generate Locust file (per-record to avoid collisions)
         locust_code = self.generate_locust_code(case, base_url=base_url, variables=merged_vars)
         locust_file = f"perf_{perf_record.id}.py"
-        base_dir = str(getattr(settings, 'BASE_DIR', os.getcwd()))
-        locust_path = os.path.join(base_dir, locust_file)
+        perf_dir = os.path.join(str(getattr(settings, 'MEDIA_ROOT', os.getcwd())), 'perf', str(perf_record.id))
+        os.makedirs(perf_dir, exist_ok=True)
+        locust_path = os.path.join(perf_dir, locust_file)
         with open(locust_path, 'w', encoding='utf-8') as f:
             f.write(locust_code)
 
@@ -500,10 +514,30 @@ class QuickstartUser(HttpUser):
         if spec is None and not spec_url and not spec_yaml:
             return Response({'detail': '缺少 spec / spec_url / spec_yaml'}, status=status.HTTP_400_BAD_REQUEST)
 
+        project = Project.objects.filter(id=project_id, owner=request.user).first()
+        if project is None:
+            return Response({'detail': '项目不存在或无权限'}, status=status.HTTP_404_NOT_FOUND)
+
         if spec is None:
             if spec_url:
+                allow_hosts = []
+                for u in EnvConfig.objects.filter(project=project).values_list('base_url', flat=True):
+                    if not u:
+                        continue
+                    try:
+                        h = urlparse(str(u)).hostname
+                    except Exception:
+                        h = None
+                    if h:
+                        allow_hosts.append(h)
                 try:
-                    resp = requests.get(str(spec_url), timeout=15)
+                    validate_outbound_http_url(str(spec_url), allowed_hosts=allow_hosts or None)
+                    resp = requests.get(
+                        str(spec_url),
+                        timeout=(5, 10),
+                        allow_redirects=False,
+                        headers={'Accept': 'application/json'},
+                    )
                     resp.raise_for_status()
                     spec = resp.json()
                 except Exception as e:
@@ -520,9 +554,6 @@ class QuickstartUser(HttpUser):
             except Exception as e:
                 return Response({'detail': f'spec 不是合法 JSON: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
         
-        project = Project.objects.filter(id=project_id, owner=request.user).first()
-        if project is None:
-            return Response({'detail': '项目不存在或无权限'}, status=status.HTTP_404_NOT_FOUND)
         paths = spec.get('paths', {})
         count = 0
         allowed_methods = {'get', 'post', 'put', 'delete', 'patch', 'head', 'options'}
@@ -590,7 +621,9 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
             for step in case.steps or []:
                 if step.get('type') != 'http':
                     continue
-                method = str(step.get('method', 'GET')).lower()
+                method = str(step.get('method', 'GET')).upper().strip() or 'GET'
+                if method not in {'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'}:
+                    continue
                 raw_url = step.get('url', '/')
                 rendered = engine.render_string(raw_url) if isinstance(raw_url, str) else raw_url
                 target = rendered if isinstance(rendered, str) else '/'
@@ -606,7 +639,7 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
                     target = '/'
                 if not target.startswith('/'):
                     target = f"/{target}"
-                tasks.append(f"        self.client.{method}('{target}')")
+                tasks.append(f"        self.client.request({json.dumps(method)}, {json.dumps(target)})")
 
         if not tasks:
             tasks = ["        pass"]
@@ -938,7 +971,7 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
         record = self.get_object()
         if not record.csv_prefix:
             return Response({'detail': '该记录暂无 CSV 输出前缀'}, status=status.HTTP_404_NOT_FOUND)
-        base_dir = str(getattr(settings, 'BASE_DIR', os.getcwd()))
+        base_dir = os.path.join(str(getattr(settings, 'MEDIA_ROOT', os.getcwd())), 'perf', str(record.id))
         prefix = record.csv_prefix
         stats_path = os.path.join(base_dir, f'{prefix}_stats.csv')
         history_path = os.path.join(base_dir, f'{prefix}_stats_history.csv')
@@ -1044,20 +1077,31 @@ def task_status(request, task_id):
         'result': result.result if result.ready() else None
     })
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def register(request):
-    username = (request.data.get('username') or '').strip()
-    password = request.data.get('password') or ''
-    if not username or not password:
-        return Response({'detail': '缺少 username 或 password'}, status=status.HTTP_400_BAD_REQUEST)
-    if len(password) < 6:
-        return Response({'detail': '密码长度至少 6 位'}, status=status.HTTP_400_BAD_REQUEST)
-    User = get_user_model()
-    if User.objects.filter(username=username).exists():
-        return Response({'detail': '用户名已存在'}, status=status.HTTP_400_BAD_REQUEST)
-    user = User.objects.create_user(username=username, password=password)
-    return Response({'id': user.id, 'username': user.username}, status=status.HTTP_201_CREATED)
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
+
+class ThrottledTokenRefreshView(TokenRefreshView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'token_refresh'
+
+class RegisterView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'register'
+
+    def post(self, request):
+        username = (request.data.get('username') or '').strip()
+        password = request.data.get('password') or ''
+        if not username or not password:
+            return Response({'detail': '缺少 username 或 password'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(password) < 6:
+            return Response({'detail': '密码长度至少 6 位'}, status=status.HTTP_400_BAD_REQUEST)
+        User = get_user_model()
+        if User.objects.filter(username=username).exists():
+            return Response({'detail': '用户名已存在'}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.create_user(username=username, password=password)
+        return Response({'id': user.id, 'username': user.username}, status=status.HTTP_201_CREATED)
 
 def health_check(request):
     from django.http import JsonResponse

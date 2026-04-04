@@ -2,6 +2,7 @@ import time
 import subprocess
 import os
 import sys
+import re
 from celery import shared_task
 from django.core.files.base import ContentFile
 from django.conf import settings
@@ -242,28 +243,45 @@ def run_test_suite_task(suite_id, env_id=None, extra_vars=None, stop_on_failure=
 def run_perf_test_task(perf_record_id):
     try:
         record = PerfRecord.objects.get(id=perf_record_id)
-        case = record.case
-        
         locust_file = f"perf_{perf_record_id}.py"
         csv_prefix = record.csv_prefix
-        
+
+        perf_dir = os.path.join(str(getattr(settings, 'MEDIA_ROOT', os.getcwd())), 'perf', str(perf_record_id))
+        os.makedirs(perf_dir, exist_ok=True)
+        locust_path = os.path.join(perf_dir, locust_file)
+
+        duration_s = str(record.duration or '60s').strip().lower()
+        m = re.fullmatch(r'(\d+)\s*([smh]?)', duration_s)
+        if not m:
+            seconds = 60
+        else:
+            n = int(m.group(1))
+            unit = m.group(2) or 's'
+            seconds = n * (3600 if unit == 'h' else 60 if unit == 'm' else 1)
+        if seconds < 1:
+            seconds = 1
+        if seconds > 600:
+            seconds = 600
+        run_time = f'{seconds}s'
+
         cmd = [
-            sys.executable, '-m', 'locust', '-f', locust_file, '--headless',
-            '-u', str(record.users), '-r', str(record.spawn_rate),
-            '--run-time', record.duration, '--csv', csv_prefix
+            sys.executable, '-m', 'locust',
+            '-f', locust_path,
+            '--headless',
+            '-u', str(record.users),
+            '-r', str(record.spawn_rate),
+            '--run-time', run_time,
+            '--csv', os.path.join(perf_dir, csv_prefix),
         ]
-        
-        cwd = str(getattr(settings, 'BASE_DIR', os.getcwd()))
-        process = subprocess.Popen(cmd, cwd=cwd)
-        process.wait() # Wait for completion
+
+        subprocess.run(cmd, cwd=perf_dir, timeout=seconds + 30, check=False)
         
         record.status = 'finished'
         record.save()
 
         try:
-            fp = os.path.join(cwd, locust_file)
-            if os.path.exists(fp):
-                os.remove(fp)
+            if os.path.exists(locust_path):
+                os.remove(locust_path)
         except Exception:
             pass
         

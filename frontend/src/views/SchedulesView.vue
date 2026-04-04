@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, Edit, Calendar, Timer } from '@element-plus/icons-vue'
+import { Plus, Delete, Timer } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
 
 const loading = ref(false)
@@ -10,20 +10,7 @@ const crontabs = ref([])
 const suites = ref([])
 const cases = ref([])
 const envs = ref([])
-const dialogVisible = ref(false)
-const isEdit = ref(false)
-const editId = ref(null)
 const quickDialogVisible = ref(false)
-
-const form = reactive({
-  name: '',
-  task: 'api.tasks.run_test_suite_task',
-  crontab: null,
-  args: '[]',
-  kwargs: '{}',
-  enabled: true,
-  description: ''
-})
 
 const quickForm = reactive({
   type: 'suite',
@@ -82,30 +69,6 @@ onMounted(() => {
   loadCases()
   loadEnvs()
 })
-
-function openCreate() {
-  isEdit.value = false
-  editId.value = null
-  form.name = ''
-  form.crontab = crontabs.value[0]?.id || null
-  form.args = '[]'
-  form.kwargs = '{}'
-  form.enabled = true
-  form.description = ''
-  dialogVisible.value = true
-}
-
-function openEdit(row) {
-  isEdit.value = true
-  editId.value = row.id
-  form.name = row.name
-  form.crontab = row.crontab
-  form.args = row.args
-  form.kwargs = row.kwargs
-  form.enabled = row.enabled
-  form.description = row.description
-  dialogVisible.value = true
-}
 
 function openQuickCreate() {
   quickForm.type = 'suite'
@@ -178,28 +141,6 @@ async function submitQuick() {
   loadSchedules()
 }
 
-async function submit() {
-  if (!form.name.trim()) return ElMessage.warning('请填写任务名称')
-  if (!form.crontab) return ElMessage.warning('请选择调度周期')
-  
-  const url = isEdit.value ? `/api/schedules/${editId.value}/` : '/api/schedules/'
-  const method = isEdit.value ? 'PUT' : 'POST'
-
-  const res = await apiFetch(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(form)
-  })
-
-  if (res.ok) {
-    ElMessage.success(isEdit.value ? '已更新' : '已创建')
-    dialogVisible.value = false
-    loadSchedules()
-  } else {
-    ElMessage.error('保存失败')
-  }
-}
-
 async function submitCrontab() {
   const res = await apiFetch('/api/crontabs/', {
     method: 'POST',
@@ -211,7 +152,7 @@ async function submitCrontab() {
     ElMessage.success('周期已创建')
     crontabDialogVisible.value = false
     await loadCrontabs()
-    form.crontab = data.id
+    quickForm.crontabId = data.id
   }
 }
 
@@ -224,17 +165,6 @@ async function toggleStatus(row) {
   if (res.ok) {
     ElMessage.success(row.enabled ? '已启用' : '已禁用')
   }
-}
-
-async function triggerSchedule(row) {
-  const res = await apiFetch(`/api/schedules/${row.id}/trigger/`, {
-    method: 'POST',
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    return ElMessage.error(data.detail || '触发失败')
-  }
-  ElMessage.success('已触发执行')
 }
 
 async function removeSchedule(row) {
@@ -260,8 +190,7 @@ const getCrontabStr = (id) => {
 <template>
   <div class="schedules-view">
     <div class="page-header">
-      <el-button type="primary" :icon="Plus" @click="openCreate">新建定时任务</el-button>
-      <el-button style="margin-left: 12px" :icon="Timer" @click="openQuickCreate">快速创建(用例/套件)</el-button>
+      <el-button type="primary" :icon="Timer" @click="openQuickCreate">快速创建(用例/套件)</el-button>
     </div>
 
     <el-table v-loading="loading" :data="schedules" stripe>
@@ -280,40 +209,10 @@ const getCrontabStr = (id) => {
       <el-table-column prop="last_run_at" label="上次运行" width="180" />
       <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
-          <el-button type="success" link :icon="Timer" @click="triggerSchedule(row)">触发</el-button>
-          <el-button type="primary" link :icon="Edit" @click="openEdit(row)">编辑</el-button>
           <el-button type="danger" link :icon="Delete" @click="removeSchedule(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
-
-    <!-- 任务编辑弹窗 -->
-    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑定时任务' : '新建定时任务'" width="550px">
-      <el-form :model="form" label-width="100px">
-        <el-form-item label="任务名称" required>
-          <el-input v-model="form.name" placeholder="如：每日凌晨回归测试" />
-        </el-form-item>
-        <el-form-item label="调度周期" required>
-          <div style="display: flex; gap: 8px; width: 100%">
-            <el-select v-model="form.crontab" placeholder="选择或创建周期" style="flex: 1">
-              <el-option v-for="c in crontabs" :key="c.id" :label="getCrontabStr(c.id)" :value="c.id" />
-            </el-select>
-            <el-button :icon="Plus" @click="crontabDialogVisible = true" />
-          </div>
-        </el-form-item>
-        <el-form-item label="执行参数 (JSON)">
-          <el-input v-model="form.args" placeholder="如: [1] (测试套件ID)" />
-          <div class="hint">通常为套件 ID 列表，例如 [1]</div>
-        </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存</el-button>
-      </template>
-    </el-dialog>
 
     <!-- Cron 周期创建弹窗 -->
     <el-dialog v-model="crontabDialogVisible" title="创建 Cron 周期" width="400px">
