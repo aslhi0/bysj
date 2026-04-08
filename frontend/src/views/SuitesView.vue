@@ -3,6 +3,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
+import { useCurrentUser } from '../auth'
+import PageToolbar from '../components/PageToolbar.vue'
 
 const loading = ref(false)
 const runLoading = ref(false)
@@ -15,6 +17,7 @@ const isEdit = ref(false)
 const editId = ref(null)
 const searchQuery = ref('')
 const filterProject = ref(null)
+const { isAdminUser } = useCurrentUser()
 
 const filteredSuites = computed(() => {
   let result = suites.value
@@ -123,6 +126,7 @@ const runEnvs = computed(() => {
 })
 
 function openCreate() {
+  if (!isAdminUser.value) return
   isEdit.value = false
   editId.value = null
   form.project = projectOptions.value[0]?.value ?? null
@@ -134,6 +138,7 @@ function openCreate() {
 }
 
 function openEdit(row) {
+  if (!isAdminUser.value) return
   isEdit.value = true
   editId.value = row.id
   form.project = row.project
@@ -154,6 +159,10 @@ function parseOrderedIds(text) {
 }
 
 async function submitSuite() {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可管理套件')
+    return
+  }
   if (!form.project) {
     ElMessage.warning('请选择项目')
     return
@@ -200,6 +209,10 @@ async function submitSuite() {
 }
 
 async function removeSuite(row) {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可管理套件')
+    return
+  }
   await ElMessageBox.confirm(`删除套件「${row.name}」？`, '确认', { type: 'warning' })
   const res = await apiFetch(`/api/suites/${row.id}/`, {
     method: 'DELETE',
@@ -382,14 +395,14 @@ async function downloadSuiteRunServerExport(row) {
 
 <template>
   <div>
-    <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-start; max-width: 960px">
-      <div>
-        <el-button type="primary" @click="openCreate">新建套件</el-button>
+    <PageToolbar>
+      <template #left>
+        <el-button v-if="isAdminUser" type="primary" @click="openCreate">新建套件</el-button>
         <span v-if="!projectOptions.length" style="margin-left: 12px; color: var(--el-color-warning)">
           请先在「测试项目」中创建项目
         </span>
-      </div>
-      <div style="display: flex; gap: 12px">
+      </template>
+      <template #right>
         <el-select v-model="filterProject" placeholder="按项目筛选" clearable style="width: 180px">
           <el-option
             v-for="opt in projectOptions"
@@ -408,10 +421,10 @@ async function downloadSuiteRunServerExport(row) {
             <el-icon><Search /></el-icon>
           </template>
         </el-input>
-      </div>
-    </div>
+      </template>
+    </PageToolbar>
     
-    <el-table v-loading="loading || runLoading" :data="filteredSuites" stripe style="width: 100%; max-width: 960px">
+    <el-table v-loading="loading || runLoading" :data="filteredSuites" stripe class="page-table">
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="name" label="套件名称" min-width="140">
         <template #default="{ row }">
@@ -425,22 +438,22 @@ async function downloadSuiteRunServerExport(row) {
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="180" />
-      <el-table-column label="操作" width="400" fixed="right">
+      <el-table-column :width="isAdminUser ? 400 : 280" label="操作" fixed="right">
         <template #default="{ row }">
           <el-button type="primary" link :disabled="!suiteCaseCount(row)" @click="openRunDialog(row)">
             运行套件
           </el-button>
-          <el-button type="primary" link @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="isAdminUser" type="primary" link @click="openEdit(row)">编辑</el-button>
           <el-button type="success" link @click="downloadLocust(row)">
             导出 Locust
           </el-button>
           <el-button type="info" link @click="openHistory(row)">执行历史</el-button>
-          <el-button type="danger" link @click="removeSuite(row)">删除</el-button>
+          <el-button v-if="isAdminUser" type="danger" link @click="removeSuite(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑测试套件' : '新建测试套件'" width="560px" destroy-on-close>
+    <el-dialog v-if="isAdminUser" v-model="dialogVisible" :title="isEdit ? '编辑测试套件' : '新建测试套件'" width="560px" destroy-on-close>
       <el-form label-width="100px">
         <el-form-item label="项目" required>
           <el-select v-model="form.project" placeholder="选择项目" style="width: 100%">
@@ -482,7 +495,7 @@ async function downloadSuiteRunServerExport(row) {
     </el-dialog>
 
     <!-- 选择用例弹窗 -->
-    <el-dialog v-model="selectCasesVisible" title="从项目中选择用例" width="500px">
+    <el-dialog v-if="isAdminUser" v-model="selectCasesVisible" title="从项目中选择用例" width="500px">
       <el-checkbox-group v-model="selectedCaseIds" style="max-height: 400px; overflow-y: auto">
         <div v-for="c in projectCases" :key="c.id" style="margin-bottom: 8px">
           <el-checkbox :value="c.id" border style="width: 100%; margin-right: 0">

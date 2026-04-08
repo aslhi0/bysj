@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from .crypto_utils import decrypt_json
 from .locust_codegen import generate_locust_code
 from .models import TestRecord, SuiteRun, PerfRecord, EnvConfig
+from .query_utils import apply_project_access_filter
 from .report_utils import (
     build_test_record_report_html,
     build_test_record_report_json_payload,
@@ -21,6 +22,7 @@ from .report_utils import (
     pick_aggregated_row,
 )
 from .serializers import TestRecordSerializer, SuiteRunSerializer, PerfRecordSerializer
+from .tasks import reconcile_stale_perf_records
 
 
 class TestRecordViewSet(viewsets.ReadOnlyModelViewSet):
@@ -30,7 +32,8 @@ class TestRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        return qs.filter(case__project__owner=self.request.user).order_by("-created_at")
+        user = self.request.user
+        return apply_project_access_filter(qs, user, "case__project").order_by("-created_at")
 
     @action(detail=True, methods=["get"])
     def report(self, request, pk=None):
@@ -70,7 +73,8 @@ class SuiteRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        return qs.filter(suite__project__owner=self.request.user).order_by("-created_at")
+        user = self.request.user
+        return apply_project_access_filter(qs, user, "suite__project").order_by("-created_at")
 
     @action(detail=True, methods=["get"])
     def export(self, request, pk=None):
@@ -99,8 +103,14 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        # 自愈历史遗留的长时间 running/queued 记录，避免前端永久转圈。
+        try:
+            reconcile_stale_perf_records()
+        except Exception:
+            pass
         qs = super().get_queryset()
-        return qs.filter(case__project__owner=self.request.user).order_by("-created_at")
+        user = self.request.user
+        return apply_project_access_filter(qs, user, "case__project").order_by("-created_at")
 
     @action(detail=True, methods=["get"])
     def report(self, request, pk=None):

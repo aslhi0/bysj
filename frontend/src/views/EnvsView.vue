@@ -3,6 +3,7 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Delete, Edit, Monitor } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
+import { useCurrentUser } from '../auth'
 
 const loading = ref(false)
 const envs = ref([])
@@ -12,6 +13,7 @@ const isEdit = ref(false)
 const editId = ref(null)
 const searchQuery = ref('')
 const filterProject = ref(null)
+const { isAdminUser } = useCurrentUser()
 
 const form = reactive({
   project: null,
@@ -59,6 +61,7 @@ onMounted(async () => {
 })
 
 function openCreate() {
+  if (!isAdminUser.value) return
   isEdit.value = false
   editId.value = null
   form.project = projectOptions.value[0]?.value || null
@@ -71,6 +74,7 @@ function openCreate() {
 }
 
 function openEdit(row) {
+  if (!isAdminUser.value) return
   isEdit.value = true
   editId.value = row.id
   form.project = row.project
@@ -83,6 +87,10 @@ function openEdit(row) {
 }
 
 async function submit() {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可管理环境配置')
+    return
+  }
   if (!form.project) return ElMessage.warning('请选择项目')
   if (!form.name.trim()) return ElMessage.warning('请填写环境名称')
   
@@ -125,6 +133,10 @@ async function submit() {
 }
 
 async function removeEnv(row) {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可管理环境配置')
+    return
+  }
   try {
     await ElMessageBox.confirm('确定删除该环境配置吗？', '警告', { type: 'warning' })
     const res = await apiFetch(`/api/envs/${row.id}/`, {
@@ -142,7 +154,7 @@ async function removeEnv(row) {
   <div class="envs-view">
     <div class="page-header">
       <div class="left">
-        <el-button type="primary" :icon="Plus" @click="openCreate">新建环境</el-button>
+        <el-button v-if="isAdminUser" type="primary" :icon="Plus" @click="openCreate">新建环境</el-button>
       </div>
       <div class="right">
         <el-select v-model="filterProject" placeholder="按项目筛选" clearable style="width: 180px">
@@ -163,7 +175,7 @@ async function removeEnv(row) {
         </template>
       </el-table-column>
       <el-table-column prop="base_url" label="基础 URL" min-width="200" show-overflow-tooltip />
-      <el-table-column label="操作" width="150" fixed="right">
+      <el-table-column v-if="isAdminUser" label="操作" width="150" fixed="right">
         <template #default="{ row }">
           <el-button type="primary" link :icon="Edit" @click="openEdit(row)">编辑</el-button>
           <el-button type="danger" link :icon="Delete" @click="removeEnv(row)">删除</el-button>
@@ -171,7 +183,7 @@ async function removeEnv(row) {
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑环境' : '新建环境'" width="500px">
+    <el-dialog v-if="isAdminUser" v-model="dialogVisible" :title="isEdit ? '编辑环境' : '新建环境'" width="500px">
       <el-form :model="form" label-width="100px">
         <el-form-item label="所属项目" required>
           <el-select v-model="form.project" placeholder="请选择项目" style="width: 100%">

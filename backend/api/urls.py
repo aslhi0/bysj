@@ -6,15 +6,13 @@ from .health import health_check
 from .views import (
     ProjectViewSet, TestCaseViewSet, TestSuiteViewSet,
     TestRecordViewSet, SuiteRunViewSet, EnvConfigViewSet,
-    CrontabScheduleViewSet, PeriodicTaskViewSet, PerfRecordViewSet, AuditLogViewSet,
-    task_status, RegisterView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView,
+    PerfRecordViewSet, AuditLogViewSet,
+    task_status, RegisterView, ThrottledTokenObtainPairView, ThrottledTokenRefreshView, MeView, AdminUserListView,
 )
 
 router = DefaultRouter()
 router.register(r'projects', ProjectViewSet)
 router.register(r'envs', EnvConfigViewSet)
-router.register(r'crontabs', CrontabScheduleViewSet)
-router.register(r'schedules', PeriodicTaskViewSet)
 router.register(r'perf-records', PerfRecordViewSet)
 router.register(r'cases', TestCaseViewSet)
 router.register(r'suites', TestSuiteViewSet)
@@ -28,6 +26,8 @@ urlpatterns = [
     path('health/', health_check),
     path('schema/', schema_view),
     path('auth/register/', RegisterView.as_view()),
+    path('auth/me/', MeView.as_view()),
+    path('auth/users/', AdminUserListView.as_view()),
     path('auth/token/', ThrottledTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/token/refresh/', ThrottledTokenRefreshView.as_view(), name='token_refresh'),
     path('task-status/<str:task_id>/', task_status),

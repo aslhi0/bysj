@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { getAccessToken } from '../api'
+import { loadCurrentUser } from '../auth'
 
 const routes = [
   {
@@ -33,11 +34,6 @@ const routes = [
     component: () => import('../views/EnvsView.vue'),
   },
   {
-    path: '/schedules',
-    name: 'schedules',
-    component: () => import('../views/SchedulesView.vue'),
-  },
-  {
     path: '/perf',
     name: 'perf',
     component: () => import('../views/PerfView.vue'),
@@ -47,6 +43,10 @@ const routes = [
     name: 'audit',
     component: () => import('../views/AuditLogsView.vue'),
   },
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
+  },
 ]
 
 const router = createRouter({
@@ -54,10 +54,17 @@ const router = createRouter({
   routes,
 })
 
-router.beforeEach((to) => {
+const adminOnlyPaths = new Set(['/envs', '/audit'])
+
+router.beforeEach(async (to) => {
   if (to.path === '/login') return true
   const token = getAccessToken()
   if (!token) return { path: '/login', query: { redirect: to.fullPath } }
+  if (adminOnlyPaths.has(to.path)) {
+    const me = await loadCurrentUser()
+    const isAdmin = Boolean(me && (me.is_staff || me.is_superuser))
+    if (!isAdmin) return { path: '/' }
+  }
   return true
 })
 

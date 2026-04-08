@@ -1,7 +1,6 @@
 <script setup>
 import { onMounted, ref, nextTick } from 'vue'
 import { Monitor, Files, List, Collection, Check, Close } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
 import { apiFetch } from '../api'
 
 const apiStatus = ref('加载中…')
@@ -16,9 +15,18 @@ const recentRecords = ref([])
 
 const chartRef = ref(null)
 let myChart = null
+let echartsLib = null
 
-const initChart = (data) => {
+async function ensureEcharts() {
+  if (!echartsLib) {
+    echartsLib = await import('echarts')
+  }
+  return echartsLib
+}
+
+const initChart = async (data) => {
   if (!chartRef.value) return
+  const echarts = await ensureEcharts()
   if (myChart) myChart.dispose()
   myChart = echarts.init(chartRef.value)
   
@@ -68,9 +76,8 @@ onMounted(async () => {
     
     recentRecords.value = r || []
     
-    nextTick(() => {
-      initChart(r)
-    })
+    await nextTick()
+    await initChart(r)
     
     const passed = r.filter(i => i.status === 'success').length
     stats.value.pass_rate = r.length ? `${Math.round((passed / r.length) * 100)}%` : '0%'

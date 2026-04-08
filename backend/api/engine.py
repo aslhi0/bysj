@@ -17,6 +17,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# 预编译变量渲染正则：同时匹配 {{var}} / {{ var }} / [[var]] / [[ var ]]
+_VAR_RE = re.compile(r'\{\{[ ]?(\w+)[ ]?\}\}|\[\[[ ]?(\w+)[ ]?\]\]')
+# 预编译 Faker 占位符：{{faker.method}} / [[faker.method]]
+_FAKER_RE = re.compile(r'(\{\{|\[\[)faker\.(\w+)(\}\}|\]\])')
+
 def validate_outbound_http_url(url, *, allowed_hosts=None):
     if not isinstance(url, str) or not url.strip():
         raise ValueError('url 不能为空')
@@ -146,31 +151,39 @@ class TestEngine:
                 self.add_log(f"截图失败: {str(e)}")
 
     def render_string(self, text: Any) -> Any:
-        """将 {{var}} / [[var]] 及常见 faker 占位符替换为变量或随机值。"""
+        """将 {{var}} / [[var]] 及 {{faker.method}} 占位符替换为变量或随机值。
+
+        使用预编译正则一次性扫描字符串，O(n) 而非 O(n×m)。
+        Faker 方法动态调用，支持 faker 库中所有可用属性/方法。
+        """
         if not isinstance(text, str):
             return text
-        
-        # 渲染常规变量
-        for k, v in self.variables.items():
-            text = text.replace(f"{{{{{k}}}}}", str(v))
-            text = text.replace(f"[[{k}]]", str(v))
-            text = text.replace(f"{{{{ {k} }}}}", str(v))
-            text = text.replace(f"[[ {k} ]]", str(v))
-            
-        # 渲染 Faker 变量
-        if '{{faker.' in text:
-            if '{{faker.name}}' in text: text = text.replace('{{faker.name}}', self.faker.name())
-            if '{{faker.phone}}' in text: text = text.replace('{{faker.phone}}', self.faker.phone_number())
-            if '{{faker.address}}' in text: text = text.replace('{{faker.address}}', self.faker.address())
-            if '{{faker.email}}' in text: text = text.replace('{{faker.email}}', self.faker.email())
-            if '{{faker.id_card}}' in text: text = text.replace('{{faker.id_card}}', self.faker.ssn())
-        if '[[faker.' in text:
-            if '[[faker.name]]' in text: text = text.replace('[[faker.name]]', self.faker.name())
-            if '[[faker.phone]]' in text: text = text.replace('[[faker.phone]]', self.faker.phone_number())
-            if '[[faker.address]]' in text: text = text.replace('[[faker.address]]', self.faker.address())
-            if '[[faker.email]]' in text: text = text.replace('[[faker.email]]', self.faker.email())
-            if '[[faker.id_card]]' in text: text = text.replace('[[faker.id_card]]', self.faker.ssn())
-            
+
+        # 先替换 faker 占位符（避免变量名恰好为 'faker.xxx' 时误替换）
+        if 'faker.' in text:
+            def _faker_sub(m: re.Match) -> str:
+                method = m.group(2)
+                # id_card 是平台约定的别名，映射到 faker.ssn()
+                if method == 'id_card':
+                    method = 'ssn'
+                attr = getattr(self.faker, method, None)
+                if attr is None:
+                    return m.group(0)
+                try:
+                    return str(attr() if callable(attr) else attr)
+                except Exception:
+                    return m.group(0)
+            text = _FAKER_RE.sub(_faker_sub, text)
+
+        # 再替换普通变量
+        if self.variables:
+            def _var_sub(m: re.Match) -> str:
+                key = m.group(1) or m.group(2)
+                if key in self.variables:
+                    return str(self.variables[key])
+                return m.group(0)
+            text = _VAR_RE.sub(_var_sub, text)
+
         return text
 
     def run_step(self, step: Dict[str, Any]) -> bool:
@@ -433,6 +446,8 @@ class TestEngine:
             }
             by = by_map.get(by_key, By.CSS_SELECTOR)
             if action == 'open':
+                if isinstance(url, str) and (url.startswith('http://') or url.startswith('https://')):
+                    validate_outbound_http_url(url)
                 self.driver.get(url)
             elif action == 'click':
                 el = WebDriverWait(self.driver, timeout).until(

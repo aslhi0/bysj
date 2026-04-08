@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django_celery_beat.models import PeriodicTask
 
 class Project(models.Model):
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='projects', verbose_name='所属用户')
@@ -15,6 +16,24 @@ class Project(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ProjectMember(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='members', verbose_name='所属项目')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='project_memberships', verbose_name='用户')
+    is_active = models.BooleanField('是否生效', default=True)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = '项目成员'
+        verbose_name_plural = verbose_name
+        constraints = [
+            models.UniqueConstraint(fields=['project', 'user'], name='uniq_project_member'),
+        ]
+
+    def __str__(self):
+        return f'{self.project_id}:{self.user_id}'
+
 
 class EnvConfig(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='envs', verbose_name='所属项目')
@@ -91,8 +110,14 @@ class TestSuite(models.Model):
         return self.name
 
 class TestRecord(models.Model):
+    STATUS_CHOICES = [
+        ('running', '执行中'),
+        ('success', '成功'),
+        ('failed', '失败'),
+        ('error', '异常'),
+    ]
     case = models.ForeignKey(TestCase, on_delete=models.CASCADE, related_name='records', verbose_name='所属用例')
-    status = models.CharField('执行结果', max_length=20, default='running')
+    status = models.CharField('执行结果', max_length=20, choices=STATUS_CHOICES, default='running')
     result_log = models.TextField('执行日志', blank=True)
     step_results = models.JSONField('步骤详情', default=list, blank=True)
     screenshot = models.ImageField('失败截图', upload_to='screenshots/%Y/%m/%d/', blank=True, null=True)
@@ -129,3 +154,27 @@ class PerfRecord(models.Model):
         verbose_name = '性能测试记录'
         verbose_name_plural = verbose_name
         ordering = ['-created_at']
+
+
+class PeriodicTaskOwner(models.Model):
+    """记录定时任务的归属用户，替代在 description JSON 中字符串匹配 owner_id 的脆弱方案。"""
+    periodic_task = models.OneToOneField(
+        PeriodicTask,
+        on_delete=models.CASCADE,
+        related_name='owner_record',
+        verbose_name='定时任务',
+    )
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='owned_periodic_tasks',
+        verbose_name='归属用户',
+    )
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = '定时任务归属'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return f'{self.periodic_task.name} → {self.owner}'

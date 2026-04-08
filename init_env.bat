@@ -2,6 +2,11 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+if not exist "backend\manage.py" (
+  echo Missing backend\manage.py, please run this script from project root.
+  exit /b 1
+)
+
 if not exist "venv\" (
   echo Creating virtual environment...
   python -m venv venv
@@ -24,19 +29,13 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "backend\" mkdir "backend"
 cd /d "%~dp0backend"
-if not exist "manage.py" (
-  echo Initializing Django project core...
-  django-admin startproject core .
-  if errorlevel 1 (
-    echo django-admin startproject failed.
-    exit /b 1
-  )
-) else (
-  echo backend\manage.py already exists, skipping startproject.
+python manage.py migrate
+if errorlevel 1 (
+  echo migrate failed.
+  exit /b 1
 )
 
 echo.
-echo Done. Next: activate venv, cd backend, run: python manage.py runserver
+echo Done. Next: cd backend ^&^& python manage.py runserver
 pause

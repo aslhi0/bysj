@@ -3,6 +3,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { ArrowDown, ArrowUp, Delete, Picture, Search } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
+import { useCurrentUser } from '../auth'
+import PageToolbar from '../components/PageToolbar.vue'
 
 const loading = ref(false)
 const runLoading = ref(false)
@@ -12,6 +14,7 @@ const stepResults = ref([])
 const screenshotDialogVisible = ref(false)
 const screenshotUrl = ref('')
 const perfDialogVisible = ref(false)
+const perfSubmitting = ref(false)
 const perfForm = reactive({
   id: null,
   title: '',
@@ -46,6 +49,7 @@ const editId = ref(null)
 const searchQuery = ref('')
 const filterProject = ref(null)
 const selectedEnvId = ref(null)
+const { isAdminUser } = useCurrentUser()
 
 const projectEnvs = computed(() => {
   if (!filterProject.value) return envs.value
@@ -210,6 +214,7 @@ onMounted(async () => {
 })
 
 function openCreate() {
+  if (!isAdminUser.value) return
   isEdit.value = false
   editId.value = null
   form.project = projectOptions.value[0]?.value ?? null
@@ -223,6 +228,7 @@ function openCreate() {
 }
 
 function openEdit(row) {
+  if (!isAdminUser.value) return
   isEdit.value = true
   editId.value = row.id
   form.project = row.project
@@ -245,6 +251,10 @@ function openEdit(row) {
 }
 
 async function submit() {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可管理用例')
+    return
+  }
   if (!form.project) {
     ElMessage.warning('请先创建至少一个测试项目')
     return
@@ -292,6 +302,10 @@ async function submit() {
 }
 
 async function removeRow(row) {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可管理用例')
+    return
+  }
   await ElMessageBox.confirm(`确定删除用例「${row.title}」？`, '确认', { type: 'warning' })
   const res = await apiFetch(`/api/cases/${row.id}/`, {
     method: 'DELETE',
@@ -305,6 +319,7 @@ async function removeRow(row) {
 }
 
 function openImportDialog() {
+  if (!isAdminUser.value) return
   importSource.value = 'body'
   importProject.value = projectOptions.value[0]?.value ?? null
   importJsonText.value = ''
@@ -314,6 +329,10 @@ function openImportDialog() {
 }
 
 async function submitImport() {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可导入 OpenAPI')
+    return
+  }
   if (!importProject.value) {
     ElMessage.warning('请选择目标项目')
     return
@@ -410,6 +429,10 @@ function showSnapshot(row) {
 }
 
 async function restoreVersion(caseId, v) {
+  if (!isAdminUser.value) {
+    ElMessage.warning('仅管理员可回滚版本')
+    return
+  }
   await ElMessageBox.confirm(`回滚到版本 v${v.version}？将生成一个新版本保存当前状态。`, '确认', { type: 'warning' })
   const res = await apiFetch(`/api/cases/${caseId}/restore_version/`, {
     method: 'POST',
@@ -503,25 +526,37 @@ function showScreenshot(url) {
 function openPerfDialog(row) {
   perfForm.id = row.id
   perfForm.title = row.title
+  perfSubmitting.value = false
   perfDialogVisible.value = true
 }
 
 async function submitPerf() {
-  const res = await apiFetch(`/api/cases/${perfForm.id}/run_perf/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      users: perfForm.users,
-      spawn_rate: perfForm.spawn_rate,
-      duration: perfForm.duration,
-      env_id: selectedEnvId.value
+  if (perfSubmitting.value) return
+  perfSubmitting.value = true
+  try {
+    const res = await apiFetch(`/api/cases/${perfForm.id}/run_perf/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        users: perfForm.users,
+        spawn_rate: perfForm.spawn_rate,
+        duration: perfForm.duration,
+        env_id: selectedEnvId.value
+      })
     })
-  })
-  if (res.ok) {
-    ElMessage.success('性能测试已在后台启动，请稍后查看生成的 CSV 结果')
-    perfDialogVisible.value = false
-  } else {
-    ElMessage.error('启动压测失败')
+    const data = await res.json().catch(() => ({}))
+    if (res.ok) {
+      if (data && data.deduplicated) {
+        ElMessage.warning('检测到重复提交，已复用最近一次压测任务')
+      } else {
+        ElMessage.success('性能测试已在后台启动，请稍后查看生成的 CSV 结果')
+      }
+      perfDialogVisible.value = false
+    } else {
+      ElMessage.error(data.detail || '启动压测失败')
+    }
+  } finally {
+    perfSubmitting.value = false
   }
 }
 
@@ -572,17 +607,17 @@ async function pollTaskStatus(taskId, title) {
 
 <template>
   <div>
-    <div style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-start; max-width: 1100px">
-      <div>
-        <el-button type="primary" @click="openCreate">新建用例</el-button>
-        <el-button type="success" plain :disabled="!projectOptions.length" @click="openImportDialog">
+    <PageToolbar>
+      <template #left>
+        <el-button v-if="isAdminUser" type="primary" @click="openCreate">新建用例</el-button>
+        <el-button v-if="isAdminUser" type="success" plain :disabled="!projectOptions.length" @click="openImportDialog">
           从 OpenAPI 导入
         </el-button>
         <span v-if="!projectOptions.length" style="margin-left: 12px; color: var(--el-color-warning)">
           请先在「测试项目」中创建项目
         </span>
-      </div>
-      <div style="display: flex; gap: 12px">
+      </template>
+      <template #right>
         <el-select v-model="selectedEnvId" placeholder="执行环境" clearable style="width: 150px">
           <el-option v-for="e in projectEnvs" :key="e.id" :label="e.name" :value="e.id" />
         </el-select>
@@ -604,10 +639,10 @@ async function pollTaskStatus(taskId, title) {
             <el-icon><Search /></el-icon>
           </template>
         </el-input>
-      </div>
-    </div>
+      </template>
+    </PageToolbar>
     
-    <el-table v-loading="loading || runLoading" :data="filteredCases" stripe style="width: 100%; max-width: 1100px">
+    <el-table v-loading="loading || runLoading" :data="filteredCases" stripe class="page-table">
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="title" label="标题" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
@@ -628,14 +663,14 @@ async function pollTaskStatus(taskId, title) {
         </template>
       </el-table-column>
       <el-table-column prop="updated_at" label="更新时间" width="180" />
-          <el-table-column label="操作" width="350" fixed="right">
+          <el-table-column :width="isAdminUser ? 350 : 220" label="操作" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link :disabled="runLoading" @click="runCase(row)">立即执行</el-button>
               <el-button type="success" link :disabled="runLoading" @click="openPerfDialog(row)">压测</el-button>
-              <el-button type="primary" link :disabled="runLoading" @click="openEdit(row)">编辑</el-button>
+              <el-button v-if="isAdminUser" type="primary" link :disabled="runLoading" @click="openEdit(row)">编辑</el-button>
               <el-button type="info" link :disabled="runLoading" @click="openCaseHistory(row)">执行历史</el-button>
               <el-button type="warning" link :disabled="runLoading" @click="openCaseVersions(row)">版本</el-button>
-              <el-button type="danger" link :disabled="runLoading" @click="removeRow(row)">删除</el-button>
+              <el-button v-if="isAdminUser" type="danger" link :disabled="runLoading" @click="removeRow(row)">删除</el-button>
             </template>
           </el-table-column>
     </el-table>
@@ -696,7 +731,7 @@ async function pollTaskStatus(taskId, title) {
           <el-table-column label="操作" width="200" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link size="small" @click="showSnapshot(row)">快照</el-button>
-              <el-button type="warning" link size="small" @click="restoreVersion(row.case, row)">回滚</el-button>
+              <el-button v-if="isAdminUser" type="warning" link size="small" @click="restoreVersion(row.case, row)">回滚</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -758,7 +793,7 @@ async function pollTaskStatus(taskId, title) {
 
     <!-- 性能测试配置弹窗 -->
     <el-dialog v-model="perfDialogVisible" :title="'性能压测: ' + perfForm.title" width="450px">
-      <el-form :model="perfForm" label-width="100px">
+      <el-form :model="perfForm" label-width="100px" :disabled="perfSubmitting">
         <el-form-item label="并发用户数">
           <el-input-number v-model="perfForm.users" :min="1" :max="5000" />
         </el-form-item>
@@ -776,12 +811,13 @@ async function pollTaskStatus(taskId, title) {
         <el-alert title="性能测试将基于接口功能用例自动转换为 Locust 场景并在后台 Headless 模式运行。" type="info" :closable="false" />
       </el-form>
       <template #footer>
-        <el-button @click="perfDialogVisible = false">取消</el-button>
-        <el-button type="success" @click="submitPerf">启动压测</el-button>
+        <el-button :disabled="perfSubmitting" @click="perfDialogVisible = false">取消</el-button>
+        <el-button type="success" :loading="perfSubmitting" :disabled="perfSubmitting" @click="submitPerf">启动压测</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
+      v-if="isAdminUser"
       v-model="importDialogVisible"
       title="从 OpenAPI / Swagger 导入"
       width="620px"
@@ -821,7 +857,7 @@ async function pollTaskStatus(taskId, title) {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dialogVisible" :title="isEdit ? '编辑用例' : '新建用例'" width="560px" destroy-on-close>
+    <el-dialog v-if="isAdminUser" v-model="dialogVisible" :title="isEdit ? '编辑用例' : '新建用例'" width="560px" destroy-on-close>
       <el-form label-width="88px">
         <el-form-item label="所属项目" required>
           <el-select v-model="form.project" placeholder="选择项目" style="width: 100%">

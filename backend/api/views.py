@@ -1,194 +1,45 @@
-import json
-
+"""Public aggregate exports for API viewsets and auth/task endpoints."""
 from celery.result import AsyncResult
-from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-from django.db.models import Q
-from django_celery_beat.models import CrontabSchedule, PeriodicTask
-from rest_framework import mixins, status, viewsets
+from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.exceptions import PermissionDenied
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from .audit_utils import audit_log
-from .models import EnvConfig, Project
-from .serializers import (
-    AuditLogSerializer,
-    CrontabScheduleSerializer,
-    EnvConfigSerializer,
-    PeriodicTaskSerializer,
-    ProjectSerializer,
-)
 from .task_tracker import get_task_owner
-from .views_cases_suites import TestCaseViewSet, TestSuiteViewSet
+from .views_case import TestCaseViewSet
+from .views_core import (
+    AuditLogViewSet,
+    EnvConfigViewSet,
+    ProjectViewSet,
+)
 from .views_records_perf import PerfRecordViewSet, SuiteRunViewSet, TestRecordViewSet
+from .views_suite import TestSuiteViewSet
 
 
-class EnvConfigViewSet(viewsets.ModelViewSet):
-    queryset = EnvConfig.objects.select_related("project", "project__owner").all()
-    serializer_class = EnvConfigSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        qs = super().get_queryset().filter(project__owner=self.request.user)
-        project = self.request.query_params.get("project")
-        q = self.request.query_params.get("q")
-        if project:
-            qs = qs.filter(project_id=project)
-        if q:
-            qs = qs.filter(name__icontains=q)
-        return qs
-
-    def list(self, request, *args, **kwargs):
-        qs = self.filter_queryset(self.get_queryset()).order_by("-id")
-        limit = request.query_params.get("limit")
-        if limit:
-            try:
-                n = int(limit)
-                if n > 0:
-                    qs = qs[: min(n, 500)]
-            except Exception:
-                pass
-        serializer = self.get_serializer(qs, many=True)
-        return Response(serializer.data)
-
-    def perform_create(self, serializer):
-        obj = serializer.save()
-        audit_log(self.request.user, obj, ADDITION, f"创建环境: {obj.name}")
-
-    def perform_update(self, serializer):
-        obj = serializer.save()
-        audit_log(self.request.user, obj, CHANGE, f"更新环境: {obj.name}")
-
-    def perform_destroy(self, instance):
-        audit_log(self.request.user, instance, DELETION, f"删除环境: {instance.name}")
-        instance.delete()
-
-
-class CrontabScheduleViewSet(viewsets.ModelViewSet):
-    queryset = CrontabSchedule.objects.all()
-    serializer_class = CrontabScheduleSerializer
-    permission_classes = [IsAuthenticated]
-
-
-class PeriodicTaskViewSet(
-    mixins.ListModelMixin,
-    mixins.RetrieveModelMixin,
-    mixins.UpdateModelMixin,
-    mixins.DestroyModelMixin,
-    viewsets.GenericViewSet,
-):
-    queryset = PeriodicTask.objects.all()
-    serializer_class = PeriodicTaskSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        oid = getattr(self.request.user, "id", None)
-        if oid:
-            qs = qs.filter(Q(description__contains=f'"owner_id": {oid}') | Q(description__contains=f'"owner_id":{oid}'))
-        return qs
-
-    def get_object(self):
-        obj = super().get_object()
-        oid = getattr(self.request.user, "id", None)
-        if not oid:
-            raise PermissionDenied("未登录")
-        try:
-            d = json.loads(obj.description or "{}")
-        except Exception:
-            d = {}
-        owner_id = d.get("owner_id") if isinstance(d, dict) else None
-        if owner_id != oid:
-            raise PermissionDenied("无权限访问该定时任务")
-        return obj
-
-    def perform_update(self, serializer):
-        obj = serializer.save()
-        audit_log(self.request.user, obj, CHANGE, f"更新定时任务: {obj.name}")
-
-    def perform_destroy(self, instance):
-        audit_log(self.request.user, instance, DELETION, f"删除定时任务: {instance.name}")
-        instance.delete()
-
-
-class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = LogEntry.objects.select_related("user", "content_type").all()
-    serializer_class = AuditLogSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        qs = super().get_queryset().filter(user=self.request.user).order_by("-action_time")
-        action = self.request.query_params.get("action")
-        model = self.request.query_params.get("model")
-        q = self.request.query_params.get("q")
-        if action in {"add", "change", "delete"}:
-            m = {"add": ADDITION, "change": CHANGE, "delete": DELETION}
-            qs = qs.filter(action_flag=m[action])
-        if model:
-            parts = str(model).split(".", 1)
-            if len(parts) == 2:
-                qs = qs.filter(content_type__app_label=parts[0], content_type__model=parts[1])
-        if q:
-            qs = qs.filter(Q(object_repr__icontains=q) | Q(change_message__icontains=q))
-        return qs
-
-    def list(self, request, *args, **kwargs):
-        qs = self.filter_queryset(self.get_queryset())
-        limit = request.query_params.get("limit")
-        if limit:
-            try:
-                n = int(limit)
-                if n > 0:
-                    qs = qs[: min(n, 500)]
-            except Exception:
-                pass
-        serializer = self.get_serializer(qs, many=True)
-        return Response(serializer.data)
-
-
-class ProjectViewSet(viewsets.ModelViewSet):
-    queryset = Project.objects.select_related("owner").all()
-    serializer_class = ProjectSerializer
-    permission_classes = [IsAuthenticated]
-
-    def get_queryset(self):
-        qs = super().get_queryset().filter(owner=self.request.user)
-        q = self.request.query_params.get("q")
-        if q:
-            qs = qs.filter(name__icontains=q)
-        return qs
-
-    def list(self, request, *args, **kwargs):
-        qs = self.filter_queryset(self.get_queryset()).order_by("-id")
-        limit = request.query_params.get("limit")
-        if limit:
-            try:
-                n = int(limit)
-                if n > 0:
-                    qs = qs[: min(n, 500)]
-            except Exception:
-                pass
-        serializer = self.get_serializer(qs, many=True)
-        return Response(serializer.data)
-
-    def perform_create(self, serializer):
-        obj = serializer.save(owner=self.request.user)
-        audit_log(self.request.user, obj, ADDITION, f"创建项目: {obj.name}")
-
-    def perform_update(self, serializer):
-        obj = serializer.save()
-        audit_log(self.request.user, obj, CHANGE, f"更新项目: {obj.name}")
-
-    def perform_destroy(self, instance):
-        audit_log(self.request.user, instance, DELETION, f"删除项目: {instance.name}")
-        instance.delete()
+def _sanitize_task_result(result_payload):
+    if not isinstance(result_payload, dict):
+        return {"status": "error", "message": str(result_payload)[:500]}
+    allowed_keys = {
+        "status",
+        "record_id",
+        "suite_run_id",
+        "perf_record_id",
+        "elapsed_time",
+        "summary",
+        "message",
+    }
+    sanitized = {k: v for k, v in result_payload.items() if k in allowed_keys}
+    if "status" not in sanitized:
+        sanitized["status"] = "error"
+    if "message" in sanitized and sanitized["message"] is not None:
+        sanitized["message"] = str(sanitized["message"])[:500]
+    return sanitized
 
 
 @api_view(["GET"])
@@ -200,12 +51,23 @@ def task_status(request, task_id):
     if int(owner_id) != int(request.user.id):
         return Response({"detail": "无权限查看该任务"}, status=status.HTTP_403_FORBIDDEN)
     result = AsyncResult(task_id)
+    ready = result.ready()
+    sanitized_result = _sanitize_task_result(result.result) if ready else None
+    if ready and isinstance(sanitized_result, dict):
+        biz_status = str(sanitized_result.get("status") or "error").lower()
+    else:
+        state = str(result.status or "").upper()
+        if state in {"PENDING", "RECEIVED", "STARTED", "RETRY"}:
+            biz_status = "pending"
+        else:
+            biz_status = state.lower() or "pending"
     return Response(
         {
             "task_id": task_id,
-            "status": result.status,
-            "ready": result.ready(),
-            "result": result.result if result.ready() else None,
+            "status": biz_status,
+            "task_state": result.status,
+            "ready": ready,
+            "result": sanitized_result,
         }
     )
 
@@ -239,3 +101,39 @@ class RegisterView(APIView):
             return Response({"detail": list(getattr(e, "messages", []) or ["密码不符合安全要求"])}, status=status.HTTP_400_BAD_REQUEST)
         user = User.objects.create_user(username=username, password=password)
         return Response({"id": user.id, "username": user.username}, status=status.HTTP_201_CREATED)
+
+
+class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        return Response(
+            {
+                "id": user.id,
+                "username": user.username,
+                "is_staff": bool(user.is_staff),
+                "is_superuser": bool(user.is_superuser),
+            }
+        )
+
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        User = get_user_model()
+        q = (request.query_params.get("q") or "").strip()
+        qs = User.objects.all().order_by("id")
+        if q:
+            qs = qs.filter(username__icontains=q)
+        data = [
+            {
+                "id": u.id,
+                "username": u.username,
+                "is_staff": bool(u.is_staff),
+                "is_superuser": bool(u.is_superuser),
+            }
+            for u in qs[:500]
+        ]
+        return Response(data)

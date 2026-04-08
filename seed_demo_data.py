@@ -1,239 +1,297 @@
 import os
-import django
+import shutil
 import sys
 
+import django
+from django.db import connection
+from django.db import transaction
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_DIR = os.path.join(BASE_DIR, 'backend')
-
+BACKEND_DIR = os.path.join(BASE_DIR, "backend")
 sys.path.append(BACKEND_DIR)
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
 django.setup()
 
 from django.contrib.auth import get_user_model
-from api.models import Project, EnvConfig, TestCase, TestSuite, TestCaseVersion
-from api.crypto_utils import encrypt_json, decrypt_json, is_encrypted, ENC_PREFIX
 
-def seed():
-    print("开始初始化演示数据...")
+from api.models import (
+    EnvConfig,
+    PerfRecord,
+    Project,
+    ProjectMember,
+    SuiteRun,
+    TestCase,
+    TestCaseVersion,
+    TestRecord,
+    TestSuite,
+)
 
-    username = os.getenv('DEMO_USERNAME') or 'demo'
-    password = os.getenv('DEMO_PASSWORD') or 'Demo123456'
+
+def _ui(action, *, url="", by="css", selector="", text="", timeout=10):
+    return {
+        "type": "ui",
+        "action": action,
+        "url": url,
+        "by": by,
+        "selector": selector,
+        "text": text,
+        "timeout": timeout,
+    }
+
+
+def _case(title, tags, steps, *, variables=None, status="active"):
+    return {
+        "title": title,
+        "tags": tags,
+        "steps": steps,
+        "variables": variables or {},
+        "status": status,
+    }
+
+
+def _login_steps(username="{{username}}", password="{{password}}"):
+    return [
+        _ui("open", url="{{base_url}}"),
+        _ui("wait_visible", by="id", selector="user-name"),
+        _ui("input", by="id", selector="user-name", text=username),
+        _ui("input", by="id", selector="password", text=password),
+        _ui("click", by="id", selector="login-button"),
+    ]
+
+
+def build_saucedemo_cases():
+    return [
+        _case(
+            "[UI] SD1-标准用户登录成功",
+            ["SauceDemo", "登录", "冒烟"],
+            _login_steps()
+            + [
+                _ui("wait_visible", by="css", selector=".inventory_list"),
+            ],
+            variables={"username": "standard_user", "password": "secret_sauce"},
+        ),
+        _case(
+            "[UI] SD2-锁定用户登录失败提示",
+            ["SauceDemo", "登录", "异常流程"],
+            _login_steps(username="locked_out_user", password="secret_sauce")
+            + [
+                _ui("wait_visible", by="css", selector='h3[data-test="error"]'),
+            ],
+            variables={"username": "locked_out_user", "password": "secret_sauce"},
+        ),
+        _case(
+            "[UI] SD3-单商品加入购物车",
+            ["SauceDemo", "购物车", "核心流程"],
+            _login_steps()
+            + [
+                _ui("wait_visible", by="id", selector="add-to-cart-sauce-labs-backpack"),
+                _ui("click", by="id", selector="add-to-cart-sauce-labs-backpack"),
+                _ui("wait_visible", by="id", selector="remove-sauce-labs-backpack"),
+                _ui("wait_visible", by="css", selector=".shopping_cart_badge"),
+            ],
+            variables={"username": "standard_user", "password": "secret_sauce"},
+        ),
+        _case(
+            "[UI] SD4-购物车查看与移除商品",
+            ["SauceDemo", "购物车", "核心流程"],
+            _login_steps()
+            + [
+                _ui("click", by="id", selector="add-to-cart-sauce-labs-backpack"),
+                _ui("click", by="css", selector=".shopping_cart_link"),
+                _ui("wait_visible", by="css", selector=".cart_item"),
+                _ui("click", by="id", selector="remove-sauce-labs-backpack"),
+                _ui("wait_visible", by="css", selector=".cart_list"),
+            ],
+            variables={"username": "standard_user", "password": "secret_sauce"},
+        ),
+        _case(
+            "[UI] SD5-完整下单流程（Checkout）",
+            ["SauceDemo", "下单", "端到端"],
+            _login_steps()
+            + [
+                _ui("click", by="id", selector="add-to-cart-sauce-labs-backpack"),
+                _ui("click", by="id", selector="add-to-cart-sauce-labs-bike-light"),
+                _ui("click", by="css", selector=".shopping_cart_link"),
+                _ui("wait_visible", by="id", selector="checkout"),
+                _ui("click", by="id", selector="checkout"),
+                _ui("wait_visible", by="id", selector="first-name"),
+                _ui("input", by="id", selector="first-name", text="Demo"),
+                _ui("input", by="id", selector="last-name", text="Tester"),
+                _ui("input", by="id", selector="postal-code", text="100000"),
+                _ui("click", by="id", selector="continue"),
+                _ui("wait_visible", by="css", selector=".summary_info"),
+                _ui("click", by="id", selector="finish"),
+                _ui("wait_visible", by="css", selector=".complete-header"),
+            ],
+            variables={"username": "standard_user", "password": "secret_sauce"},
+        ),
+        _case(
+            "[UI] SD6-登录后退出登录",
+            ["SauceDemo", "会话", "回归"],
+            _login_steps()
+            + [
+                _ui("wait_visible", by="id", selector="react-burger-menu-btn"),
+                _ui("click", by="id", selector="react-burger-menu-btn"),
+                _ui("wait_visible", by="id", selector="logout_sidebar_link"),
+                _ui("click", by="id", selector="logout_sidebar_link"),
+                _ui("wait_visible", by="id", selector="login-button"),
+            ],
+            variables={"username": "standard_user", "password": "secret_sauce"},
+        ),
+    ]
+
+
+def reset_primary_key_sequences():
+    """
+    在清空测试业务表后重置自增主键序列。
+    仅用于演示环境，避免删除重建后 ID 继续累加。
+    """
+    table_names = [
+        "api_projectmember",
+        "api_envconfig",
+        "api_testcaseversion",
+        "api_testrecord",
+        "api_suiterun",
+        "api_perfrecord",
+        "api_testsuite",
+        "api_testcase",
+        "api_project",
+    ]
+    with connection.cursor() as cursor:
+        if connection.vendor == "sqlite":
+            placeholders = ",".join(["%s"] * len(table_names))
+            cursor.execute(f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})", table_names)
+        elif connection.vendor == "postgresql":
+            for table in table_names:
+                cursor.execute(f'ALTER SEQUENCE "{table}_id_seq" RESTART WITH 1')
+
+
+@transaction.atomic
+def reset_and_seed():
+    print("开始重建数据：清空旧项目/用例/套件，切换到 SauceDemo 场景...")
+
+    demo_username = os.getenv("DEMO_USERNAME") or "demo"
+    demo_password = os.getenv("DEMO_PASSWORD") or "Demo123456"
+    viewer_username = os.getenv("VIEWER_USERNAME") or "viewer"
+    viewer_password = os.getenv("VIEWER_PASSWORD") or "Viewer123456"
+
     User = get_user_model()
-    user, u_created = User.objects.get_or_create(username=username)
-    if u_created:
-        user.set_password(password)
-        user.save(update_fields=['password'])
-        print(f"已创建演示用户: {username} / {password}")
-    else:
-        print(f"演示用户已存在: {username}")
+    demo_user, _ = User.objects.get_or_create(username=demo_username)
+    demo_user.is_staff = True
+    demo_user.is_superuser = False
+    demo_user.is_active = True
+    demo_user.set_password(demo_password)
+    demo_user.save()
 
-    project, p_created = Project.objects.get_or_create(
-        owner=user,
-        name="Demo-HTTPBin",
-        defaults={"description": "使用 httpbin.org 演示接口自动化/变量提取/断言/报告/压测/版本回滚"}
+    viewer_user, _ = User.objects.get_or_create(username=viewer_username)
+    viewer_user.is_staff = False
+    viewer_user.is_superuser = False
+    viewer_user.is_active = True
+    viewer_user.set_password(viewer_password)
+    viewer_user.save()
+
+    ProjectMember.objects.all().delete()
+    Project.objects.all().delete()
+    TestRecord.objects.filter(case__isnull=True).delete()
+    SuiteRun.objects.filter(suite__isnull=True).delete()
+    PerfRecord.objects.filter(case__isnull=True).delete()
+    TestCaseVersion.objects.filter(case__isnull=True).delete()
+    reset_primary_key_sequences()
+    print("已清空历史项目、成员授权及关联测试数据")
+
+    project = Project.objects.create(
+        owner=demo_user,
+        name="Demo-SauceDemo-Ecommerce",
+        description="基于 SauceDemo 的真实电商 UI 测试集：登录、加购、购物车、结算、退出。",
     )
-    if p_created:
-        print(f"已创建项目: {project.name}")
-    else:
-        if project.owner_id != user.id:
-            project.owner = user
-            project.save(update_fields=['owner'])
-        print(f"项目已存在: {project.name}")
 
-    def ensure_encrypted_dict(d):
-        if not isinstance(d, dict):
-            return {}
-        out = dict(d)
-        for k, v in list(out.items()):
-            if isinstance(v, str) and v.startswith(ENC_PREFIX):
-                continue
-            lk = str(k).lower()
-            if lk in {'token', 'password', 'secret', 'api_key', 'authorization', 'client_secret', 'access_token', 'refresh_token'}:
-                out = encrypt_json(out)
-                break
-        return out
-
-    env, e_created = EnvConfig.objects.get_or_create(
+    env = EnvConfig.objects.create(
         project=project,
-        name="公网演示环境",
-        defaults={
-            "base_url": "https://httpbin.org",
-            "variables": encrypt_json({"token": "demo-secret-token", "tenant": "demo"}),
-            "db_config": encrypt_json({"password": "p@ssw0rd", "sqlite_path": "db.sqlite3"}),
-            "is_default": True
-        }
+        name="SauceDemo 公网环境",
+        base_url="https://www.saucedemo.com",
+        variables={"base_url": "https://www.saucedemo.com"},
+        db_config={},
+        is_default=True,
     )
-    if not e_created:
-        updated = False
-        if env.base_url != "https://httpbin.org":
-            env.base_url = "https://httpbin.org"
-            updated = True
-        if isinstance(env.variables, dict):
-            new_vars = ensure_encrypted_dict(env.variables)
-            if new_vars != env.variables:
-                env.variables = new_vars
-                updated = True
-        else:
-            env.variables = encrypt_json({"token": "demo-secret-token", "tenant": "demo"})
-            updated = True
-        if isinstance(env.db_config, dict):
-            new_db = ensure_encrypted_dict(env.db_config)
-            if new_db != env.db_config:
-                env.db_config = new_db
-                updated = True
-        else:
-            env.db_config = encrypt_json({"password": "p@ssw0rd", "sqlite_path": "db.sqlite3"})
-            updated = True
-        if not env.is_default:
-            env.is_default = True
-            updated = True
-        if updated:
-            env.save()
-        print(f"环境已存在: {env.name}")
-    else:
-        print(f"已创建环境: {env.name}")
 
-    case_api, c_created = TestCase.objects.get_or_create(
-        project=project,
-        title="A1-获取UUID并回传校验",
-        defaults={
-            "status": "active",
-            "variables": {},
-            "steps": [
-                {
-                    "type": "http",
-                    "method": "GET",
-                    "url": "{{base_url}}/uuid",
-                    "headers": {},
-                    "body": "",
-                    "capture": {"uid": {"from": "json", "path": "uuid"}},
-                    "assertions": [
-                        {"source": "status_code", "operator": "eq", "expected": "200"},
-                        {"source": "json", "path": "uuid", "operator": "contains", "expected": "-"},
-                    ]
-                },
-                {
-                    "type": "http",
-                    "method": "GET",
-                    "url": "{{base_url}}/get?uid={{uid}}",
-                    "headers": {},
-                    "body": "",
-                    "capture": {},
-                    "assertions": [
-                        {"source": "status_code", "operator": "eq", "expected": "200"},
-                        {"source": "json", "path": "args.uid", "operator": "eq", "expected": "{{uid}}"},
-                    ]
-                }
-            ]
-        }
-    )
-    if c_created:
-        print(f"已创建用例: {case_api.title}")
-    else:
-        print(f"用例已存在: {case_api.title}")
+    ProjectMember.objects.create(project=project, user=viewer_user, is_active=True)
 
-    if not TestCaseVersion.objects.filter(case=case_api).exists():
-        v1 = 1
-        TestCaseVersion.objects.create(
-            case=case_api,
-            version=v1,
-            snapshot={
-                "project": case_api.project_id,
-                "title": case_api.title,
-                "steps": case_api.steps,
-                "variables": case_api.variables,
-                "tags": case_api.tags,
-                "setup_sql": case_api.setup_sql,
-                "teardown_sql": case_api.teardown_sql,
-                "status": case_api.status,
-                "updated_at": str(case_api.updated_at),
-            },
-            created_by=user,
+    cases = []
+    for item in build_saucedemo_cases():
+        case = TestCase.objects.create(
+            project=project,
+            title=item["title"],
+            tags=item["tags"],
+            status=item["status"],
+            variables=item["variables"],
+            steps=item["steps"],
         )
-        case_api.title = "A1-获取UUID并回传校验（示例：已更新，可回滚）"
-        case_api.save(update_fields=['title'])
         TestCaseVersion.objects.create(
-            case=case_api,
-            version=v1 + 1,
+            case=case,
+            version=1,
             snapshot={
-                "project": case_api.project_id,
-                "title": case_api.title,
-                "steps": case_api.steps,
-                "variables": case_api.variables,
-                "tags": case_api.tags,
-                "setup_sql": case_api.setup_sql,
-                "teardown_sql": case_api.teardown_sql,
-                "status": case_api.status,
-                "updated_at": str(case_api.updated_at),
+                "project": case.project_id,
+                "title": case.title,
+                "steps": case.steps,
+                "variables": case.variables,
+                "tags": case.tags,
+                "setup_sql": case.setup_sql,
+                "teardown_sql": case.teardown_sql,
+                "status": case.status,
+                "updated_at": str(case.updated_at),
             },
-            created_by=user,
+            created_by=demo_user,
         )
-        print("已生成用例版本 v1/v2（可用于前端演示回滚）")
+        cases.append(case)
+        print(f"  + 用例: {case.title}")
 
-    case_ui, ui_created = TestCase.objects.get_or_create(
+    smoke_ids = [c.id for c in cases if c.title.startswith("[UI] SD1") or c.title.startswith("[UI] SD3")]
+    e2e_ids = [c.id for c in cases if c.title.startswith("[UI] SD1") or c.title.startswith("[UI] SD5")]
+    regression_ids = [c.id for c in cases]
+    negative_ids = [c.id for c in cases if c.title.startswith("[UI] SD2")]
+
+    TestSuite.objects.create(
         project=project,
-        title="U1-UI演示（可选：失败截图）",
-        defaults={
-            "status": "draft",
-            "steps": [
-                {
-                    "type": "ui",
-                    "action": "open",
-                    "url": "https://example.com",
-                    "timeout": 15,
-                    "headless": True
-                },
-                {
-                    "type": "ui",
-                    "action": "click",
-                    "by": "css",
-                    "selector": "a",
-                    "timeout": 10,
-                    "headless": True
-                },
-                {
-                    "type": "ui",
-                    "action": "sleep",
-                    "seconds": 1
-                },
-                {
-                    "type": "ui",
-                    "action": "click",
-                    "by": "css",
-                    "selector": "#non-exist-button-for-demo",
-                    "timeout": 5,
-                    "headless": True
-                }
-            ]
-        }
+        name="SauceDemo-冒烟套件",
+        description="登录成功 + 单商品加购。",
+        variables={},
+        ordered_case_ids=smoke_ids,
     )
-    if ui_created:
-        print(f"已创建用例: {case_ui.title}（默认草稿，可手动启用）")
-
-    suite, s_created = TestSuite.objects.get_or_create(
+    TestSuite.objects.create(
         project=project,
-        name="Demo-冒烟套件",
-        defaults={
-            "description": "包含 A1 用例，演示套件批量执行、历史与汇总",
-            "variables": {},
-            "ordered_case_ids": [case_api.id],
-        }
+        name="SauceDemo-交易链路套件",
+        description="登录 -> 加购 -> Checkout 完整业务链路。",
+        variables={},
+        ordered_case_ids=e2e_ids,
     )
-    if not s_created:
-        ids = suite.ordered_case_ids or []
-        if case_api.id not in ids:
-            suite.ordered_case_ids = [case_api.id] + ids
-            suite.save(update_fields=['ordered_case_ids'])
-    print(f"套件已就绪: {suite.name}")
+    TestSuite.objects.create(
+        project=project,
+        name="SauceDemo-异常流程套件",
+        description="锁定用户登录失败校验。",
+        variables={},
+        ordered_case_ids=negative_ids,
+    )
+    TestSuite.objects.create(
+        project=project,
+        name="SauceDemo-回归套件",
+        description="覆盖登录、加购、购物车、结算、退出。",
+        variables={},
+        ordered_case_ids=regression_ids,
+    )
 
-    masked_vars = decrypt_json(env.variables) if isinstance(env.variables, dict) else {}
-    print("\n数据初始化完成！")
-    print(f"- 登录账号：{username} / {password}")
+    perf_dir = os.path.join(BACKEND_DIR, "media", "perf")
+    if os.path.isdir(perf_dir):
+        shutil.rmtree(perf_dir, ignore_errors=True)
+    os.makedirs(perf_dir, exist_ok=True)
+
+    print("\n重建完成：")
+    print(f"- 管理员账号：{demo_username} / {demo_password}")
+    print(f"- 普通用户账号：{viewer_username} / {viewer_password}")
     print(f"- 项目：{project.name}")
-    print(f"- 默认环境：{env.name} base_url={env.base_url}")
-    if masked_vars.get('token'):
-        print("- 环境 variables.token 已加密存储，接口返回将显示为 ******")
+    print(f"- 环境：{env.name} ({env.base_url})")
+    print(f"- 用例数：{len(cases)}（全部为 SauceDemo UI 流程）")
+    print("- 套件数：4（冒烟/交易链路/异常/回归）")
+
 
 if __name__ == "__main__":
-    seed()
+    reset_and_seed()

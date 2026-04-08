@@ -6,14 +6,15 @@ import os
 from django.test import TestCase as DjangoTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from .models import Project, EnvConfig, TestCase as DbTestCase, TestSuite as DbTestSuite, PerfRecord
+from .models import Project, ProjectMember, EnvConfig, TestCase as DbTestCase, TestSuite as DbTestSuite, PerfRecord
 from .engine import TestEngine, validate_outbound_http_url
 from .tasks import run_test_case_task, run_test_suite_task
 from .health import health_check
-from .views import PerfRecordViewSet, task_status, RegisterView
+from .views import PerfRecordViewSet, task_status, RegisterView, AdminUserListView
 from .locust_codegen import generate_locust_code
 from .utils import Notifier
 from .crypto_utils import decrypt_json, encrypt_str, decrypt_str, merge_masked, ENC_PREFIX, MASK
+from .task_tracker import bind_task_owner, get_task_owner
 
 class FakeResponse:
     def __init__(self, status_code=200, json_data=None, headers=None):
@@ -269,6 +270,8 @@ class TestIntegrationTasks(DjangoTestCase):
         from . import views as api_views
         from django.contrib.auth import get_user_model
         user = get_user_model().objects.create_user(username='u4', password='p4')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         project = Project.objects.create(name='p1', owner=user)
 
         factory = APIRequestFactory()
@@ -308,6 +311,8 @@ class TestIntegrationTasks(DjangoTestCase):
         from . import models as api_models
         from django.contrib.auth import get_user_model
         user = get_user_model().objects.create_user(username='u5', password='p5')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         project = Project.objects.create(name='p1', owner=user)
 
         factory = APIRequestFactory()
@@ -336,13 +341,14 @@ class TestIntegrationTasks(DjangoTestCase):
         self.assertEqual(upd_resp.status_code, 200)
         self.assertEqual(api_models.TestCaseVersion.objects.filter(case_id=case_id).count(), 2)
 
-    def test_project_isolation_only_sees_own_projects(self):
+    def test_project_visibility_includes_assigned_member_projects(self):
         from django.contrib.auth import get_user_model
         from . import views as api_views
 
         user1 = get_user_model().objects.create_user(username='u6', password='p6')
         user2 = get_user_model().objects.create_user(username='u7', password='p7')
         p1 = Project.objects.create(name='p1', owner=user1)
+        ProjectMember.objects.create(project=p1, user=user2, is_active=True)
 
         factory = APIRequestFactory()
         req = factory.get('/api/projects/')
@@ -350,7 +356,55 @@ class TestIntegrationTasks(DjangoTestCase):
         resp = api_views.ProjectViewSet.as_view({'get': 'list'})(req)
         self.assertEqual(resp.status_code, 200)
         ids = [r.get('id') for r in resp.data]
-        self.assertNotIn(p1.id, ids)
+        self.assertIn(p1.id, ids)
+
+    def test_project_members_can_access_cases_but_unassigned_users_cannot(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        owner = get_user_model().objects.create_user(username='u6_owner', password='p6')
+        member = get_user_model().objects.create_user(username='u6_member', password='p6')
+        stranger = get_user_model().objects.create_user(username='u6_stranger', password='p6')
+        project = Project.objects.create(name='p-member', owner=owner)
+        ProjectMember.objects.create(project=project, user=member, is_active=True)
+        case = DbTestCase.objects.create(project=project, title='c-member', status='draft', steps=[])
+
+        factory = APIRequestFactory()
+
+        list_req = factory.get('/api/cases/')
+        force_authenticate(list_req, user=member)
+        list_resp = api_views.TestCaseViewSet.as_view({'get': 'list'})(list_req)
+        self.assertEqual(list_resp.status_code, 200)
+        ids = [row.get('id') for row in list_resp.data]
+        self.assertIn(case.id, ids)
+
+        retrieve_req = factory.get(f'/api/cases/{case.id}/')
+        force_authenticate(retrieve_req, user=stranger)
+        retrieve_resp = api_views.TestCaseViewSet.as_view({'get': 'retrieve'})(retrieve_req, pk=str(case.id))
+        self.assertEqual(retrieve_resp.status_code, 404)
+
+    def test_admin_can_add_and_remove_project_member(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        admin = get_user_model().objects.create_user(username='u6_admin', password='p6')
+        admin.is_staff = True
+        admin.save(update_fields=['is_staff'])
+        user = get_user_model().objects.create_user(username='u6_target', password='p6')
+        project = Project.objects.create(name='p-admin-member', owner=admin)
+
+        factory = APIRequestFactory()
+        add_req = factory.post(f'/api/projects/{project.id}/add_member/', {'user_id': user.id}, format='json')
+        force_authenticate(add_req, user=admin)
+        add_resp = api_views.ProjectViewSet.as_view({'post': 'add_member'})(add_req, pk=str(project.id))
+        self.assertEqual(add_resp.status_code, 200)
+        self.assertTrue(ProjectMember.objects.filter(project=project, user=user, is_active=True).exists())
+
+        remove_req = factory.post(f'/api/projects/{project.id}/remove_member/', {'user_id': user.id}, format='json')
+        force_authenticate(remove_req, user=admin)
+        remove_resp = api_views.ProjectViewSet.as_view({'post': 'remove_member'})(remove_req, pk=str(project.id))
+        self.assertEqual(remove_resp.status_code, 200)
+        self.assertFalse(ProjectMember.objects.filter(project=project, user=user).exists())
 
     def test_audit_log_is_created_on_project_create(self):
         from django.contrib.auth import get_user_model
@@ -358,6 +412,8 @@ class TestIntegrationTasks(DjangoTestCase):
         from . import views as api_views
 
         user = get_user_model().objects.create_user(username='u8', password='p8')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         factory = APIRequestFactory()
         req = factory.post('/api/projects/', {'name': 'p', 'description': '', 'webhook_url': ''}, format='json')
         force_authenticate(req, user=user)
@@ -365,7 +421,7 @@ class TestIntegrationTasks(DjangoTestCase):
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(LogEntry.objects.filter(user=user, object_id=str(resp.data.get('id'))).exists())
 
-    def test_audit_logs_endpoint_returns_only_current_user(self):
+    def test_audit_logs_endpoint_admin_can_view_all(self):
         from django.contrib.auth import get_user_model
         from django.contrib.admin.models import LogEntry, ADDITION
         from django.contrib.contenttypes.models import ContentType
@@ -373,6 +429,8 @@ class TestIntegrationTasks(DjangoTestCase):
 
         user1 = get_user_model().objects.create_user(username='u9', password='p9')
         user2 = get_user_model().objects.create_user(username='u10', password='p10')
+        user1.is_staff = True
+        user1.save(update_fields=['is_staff'])
 
         ct = ContentType.objects.get_for_model(Project)
         LogEntry.objects.log_action(
@@ -397,53 +455,9 @@ class TestIntegrationTasks(DjangoTestCase):
         force_authenticate(req, user=user1)
         resp = api_views.AuditLogViewSet.as_view({'get': 'list'})(req)
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(all(r.get('user') == user1.id for r in resp.data))
-
-    def test_case_schedules_filters_by_description_json(self):
-        from django.contrib.auth import get_user_model
-        from django_celery_beat.models import PeriodicTask
-        from django_celery_beat.models import CrontabSchedule
-        from . import views as api_views
-
-        user1 = get_user_model().objects.create_user(username='u11', password='p11')
-        user2 = get_user_model().objects.create_user(username='u12', password='p12')
-        project = Project.objects.create(name='p', owner=user1)
-        case = DbTestCase.objects.create(project=project, title='c', status='draft', steps=[])
-
-        crontab, _ = CrontabSchedule.objects.get_or_create(
-            minute='*',
-            hour='*',
-            day_of_week='*',
-            day_of_month='*',
-            month_of_year='*',
-            timezone='Asia/Shanghai',
-        )
-        PeriodicTask.objects.create(
-            name='x',
-            task='api.tasks.run_test_case_task',
-            crontab=crontab,
-            args='[]',
-            kwargs='{}',
-            enabled=True,
-            description=json.dumps({'type': 'case', 'case_id': case.id, 'owner_id': user2.id}),
-        )
-        PeriodicTask.objects.create(
-            name='y',
-            task='api.tasks.run_test_case_task',
-            crontab=crontab,
-            args='[]',
-            kwargs='{}',
-            enabled=True,
-            description=json.dumps({'type': 'case', 'case_id': case.id, 'owner_id': user1.id}),
-        )
-
-        factory = APIRequestFactory()
-        req = factory.get(f'/api/cases/{case.id}/schedules/')
-        force_authenticate(req, user=user1)
-        resp = api_views.TestCaseViewSet.as_view({'get': 'schedules'})(req, pk=str(case.id))
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data), 1)
-
+        users = {r.get('user') for r in resp.data}
+        self.assertIn(user1.id, users)
+        self.assertIn(user2.id, users)
 
 class TestEngineRenderAndStep(TestCase):
     def test_render_string_variable_placeholder(self):
@@ -489,7 +503,8 @@ class TestPublicAndAuthEndpoints(DjangoTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.data
         self.assertEqual(body.get('task_id'), 'tid-1')
-        self.assertEqual(body.get('status'), 'PENDING')
+        self.assertEqual(body.get('status'), 'pending')
+        self.assertEqual(body.get('task_state'), 'PENDING')
 
     def test_task_status_rejects_other_users_task(self):
         from django.test import RequestFactory
@@ -503,6 +518,54 @@ class TestPublicAndAuthEndpoints(DjangoTestCase):
         with patch('api.views.get_task_owner', return_value=owner.id):
             resp = task_status(req, 'tid-2')
         self.assertEqual(resp.status_code, 403)
+
+    def test_task_status_sanitizes_ready_result_payload(self):
+        from django.test import RequestFactory
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_user('tasku4', 'StrongPass2026!')
+        rf = RequestFactory()
+        req = rf.get('/api/task-status/x/')
+        force_authenticate(req, user=user)
+        with patch('api.views.get_task_owner', return_value=user.id), patch('api.views.AsyncResult') as AR:
+            inst = MagicMock()
+            inst.status = 'SUCCESS'
+            inst.ready.return_value = True
+            inst.result = {
+                'status': 'success',
+                'record_id': 12,
+                'elapsed_time': '0.12',
+                'secret': 'should-not-leak',
+                'debug_raw': {'foo': 'bar'},
+            }
+            AR.return_value = inst
+            resp = task_status(req, 'tid-3')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.data.get('result') or {}
+        self.assertEqual(payload.get('status'), 'success')
+        self.assertEqual(payload.get('record_id'), 12)
+        self.assertNotIn('secret', payload)
+        self.assertNotIn('debug_raw', payload)
+
+    def test_task_status_wraps_non_dict_ready_result(self):
+        from django.test import RequestFactory
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_user('tasku5', 'StrongPass2026!')
+        rf = RequestFactory()
+        req = rf.get('/api/task-status/x/')
+        force_authenticate(req, user=user)
+        with patch('api.views.get_task_owner', return_value=user.id), patch('api.views.AsyncResult') as AR:
+            inst = MagicMock()
+            inst.status = 'FAILURE'
+            inst.ready.return_value = True
+            inst.result = RuntimeError('backend exploded')
+            AR.return_value = inst
+            resp = task_status(req, 'tid-4')
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.data.get('result') or {}
+        self.assertEqual(payload.get('status'), 'error')
+        self.assertIn('backend exploded', payload.get('message', ''))
 
     def test_register_rejects_short_password(self):
         from django.test import RequestFactory
@@ -629,6 +692,28 @@ class TestNotifierUtils(TestCase):
 
 
 class TestViewSetIntegration(DjangoTestCase):
+    def test_admin_user_list_requires_admin(self):
+        from django.contrib.auth import get_user_model
+
+        admin = get_user_model().objects.create_user('aul_admin', 'StrongPass2026!')
+        admin.is_staff = True
+        admin.save(update_fields=['is_staff'])
+        normal = get_user_model().objects.create_user('aul_user', 'StrongPass2026!')
+
+        factory = APIRequestFactory()
+        req1 = factory.get('/api/auth/users/')
+        force_authenticate(req1, user=admin)
+        resp1 = AdminUserListView.as_view()(req1)
+        self.assertEqual(resp1.status_code, 200)
+        usernames = {row.get('username') for row in resp1.data}
+        self.assertIn('aul_admin', usernames)
+        self.assertIn('aul_user', usernames)
+
+        req2 = factory.get('/api/auth/users/')
+        force_authenticate(req2, user=normal)
+        resp2 = AdminUserListView.as_view()(req2)
+        self.assertEqual(resp2.status_code, 403)
+
     def test_cannot_retrieve_other_users_case(self):
         from django.contrib.auth import get_user_model
         from . import views as api_views
@@ -800,6 +885,8 @@ class TestViewSetIntegration(DjangoTestCase):
         from . import models as api_models
 
         user = get_user_model().objects.create_user('rv1', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         project = Project.objects.create(name='p', owner=user)
         case = DbTestCase.objects.create(project=project, title='old', status='draft', steps=[])
         api_models.TestCaseVersion.objects.create(
@@ -839,6 +926,8 @@ class TestViewSetIntegration(DjangoTestCase):
         from . import views as api_views
 
         user = get_user_model().objects.create_user('al1', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         ct = ContentType.objects.get_for_model(Project)
         LogEntry.objects.log_action(
             user_id=user.id,
@@ -895,7 +984,7 @@ class TestViewSetIntegration(DjangoTestCase):
         factory = APIRequestFactory()
         req = factory.post(f'/api/cases/{case.id}/run/', {}, format='json')
         force_authenticate(req, user=user)
-        with patch('api.views_cases_suites.run_test_case_task') as m_task:
+        with patch('api.views_case.run_test_case_task') as m_task:
             m_task.delay.return_value = MagicMock(id='fake-task-id')
             resp = api_views.TestCaseViewSet.as_view({'post': 'run'})(req, pk=str(case.id))
         self.assertEqual(resp.status_code, 200)
@@ -965,6 +1054,8 @@ class TestViewSetIntegration(DjangoTestCase):
         from . import views as api_views
 
         user = get_user_model().objects.create_user('io1', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         project = Project.objects.create(name='p', owner=user)
         payload = {
             'project': project.id,
@@ -991,6 +1082,8 @@ class TestViewSetIntegration(DjangoTestCase):
         from . import views as api_views
 
         user = get_user_model().objects.create_user('io2', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         project = Project.objects.create(name='p', owner=user)
         payload = {'project': project.id, 'spec': {'openapi': '3.0.0', 'paths': []}}
         factory = APIRequestFactory()
@@ -1004,6 +1097,8 @@ class TestViewSetIntegration(DjangoTestCase):
         from . import views as api_views
 
         user = get_user_model().objects.create_user('io3', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
         project = Project.objects.create(name='p', owner=user)
         payload = {'project': project.id, 'spec_yaml': 'a' * 1_500_001}
         factory = APIRequestFactory()
@@ -1011,3 +1106,120 @@ class TestViewSetIntegration(DjangoTestCase):
         force_authenticate(req, user=user)
         resp = api_views.TestCaseViewSet.as_view({'post': 'import_openapi'})(req)
         self.assertEqual(resp.status_code, 400)
+
+    def test_import_openapi_conflict_skip_keeps_existing(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('io4', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
+        project = Project.objects.create(name='p', owner=user)
+        title = 'GET /users - List users'
+        existing = DbTestCase.objects.create(
+            project=project,
+            title=title,
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '{{base_url}}/old', 'headers': {}, 'body': ''}],
+        )
+        payload = {
+            'project': project.id,
+            'on_conflict': 'skip',
+            'spec': {
+                'openapi': '3.0.0',
+                'paths': {'/users': {'get': {'summary': 'List users'}}},
+            },
+        }
+        factory = APIRequestFactory()
+        req = factory.post('/api/cases/import-openapi/', payload, format='json')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'import_openapi'})(req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get('count'), 0)
+        existing.refresh_from_db()
+        self.assertEqual(existing.steps[0].get('url'), '{{base_url}}/old')
+
+    def test_import_openapi_conflict_overwrite_updates_existing(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('io5', 'StrongPass2026!')
+        user.is_staff = True
+        user.save(update_fields=['is_staff'])
+        project = Project.objects.create(name='p', owner=user)
+        title = 'GET /users - List users'
+        existing = DbTestCase.objects.create(
+            project=project,
+            title=title,
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '{{base_url}}/old', 'headers': {}, 'body': ''}],
+        )
+        payload = {
+            'project': project.id,
+            'on_conflict': 'overwrite',
+            'spec': {
+                'openapi': '3.0.0',
+                'paths': {'/users': {'get': {'summary': 'List users'}}},
+            },
+        }
+        factory = APIRequestFactory()
+        req = factory.post('/api/cases/import-openapi/', payload, format='json')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'import_openapi'})(req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get('count'), 1)
+        existing.refresh_from_db()
+        self.assertEqual(existing.status, 'draft')
+        self.assertEqual(existing.steps[0].get('url'), '{{base_url}}/users')
+
+    def test_suite_export_locust_returns_attachment(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('su1', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        case = DbTestCase.objects.create(
+            project=project,
+            title='c',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '/ping', 'headers': {}, 'body': ''}],
+        )
+        suite = DbTestSuite.objects.create(project=project, name='suite-a', ordered_case_ids=[case.id])
+
+        factory = APIRequestFactory()
+        req = factory.get(f'/api/suites/{suite.id}/export_locust/')
+        force_authenticate(req, user=user)
+        resp = api_views.TestSuiteViewSet.as_view({'get': 'export_locust'})(req, pk=str(suite.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('attachment', resp.get('Content-Disposition', ''))
+
+    def test_suite_run_enqueues_task(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('su3', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        suite = DbTestSuite.objects.create(project=project, name='suite-c', ordered_case_ids=[])
+        EnvConfig.objects.create(project=project, name='env', base_url='https://example.com', variables={}, is_default=True)
+
+        factory = APIRequestFactory()
+        req = factory.post(f'/api/suites/{suite.id}/run/', {}, format='json')
+        force_authenticate(req, user=user)
+        with patch('api.views_suite.run_test_suite_task') as m_task:
+            m_task.delay.return_value = MagicMock(id='suite-task-1')
+            resp = api_views.TestSuiteViewSet.as_view({'post': 'run'})(req, pk=str(suite.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get('task_id'), 'suite-task-1')
+        m_task.delay.assert_called_once()
+
+
+class TestTaskTracker(DjangoTestCase):
+    def test_bind_and_get_task_owner(self):
+        bind_task_owner('tid-abc', 123)
+        self.assertEqual(get_task_owner('tid-abc'), 123)
+
+    def test_bind_task_owner_ignores_empty(self):
+        bind_task_owner('', 1)
+        bind_task_owner('tid-z', None)
+        self.assertIsNone(get_task_owner(''))
+        self.assertIsNone(get_task_owner('tid-z'))

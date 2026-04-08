@@ -1,7 +1,6 @@
 from rest_framework import serializers
-from django_celery_beat.models import PeriodicTask, CrontabSchedule
 from django.contrib.admin.models import LogEntry
-from .models import Project, TestCase, TestSuite, TestRecord, SuiteRun, EnvConfig, PerfRecord, TestCaseVersion
+from .models import Project, ProjectMember, TestCase, TestSuite, TestRecord, SuiteRun, EnvConfig, PerfRecord, TestCaseVersion
 from .crypto_utils import encrypt_json, decrypt_json, mask_json, merge_masked
 
 def _validate_json_limits(value, *, max_depth=8, max_keys=200, max_list=500, max_str=20000, max_nodes=5000):
@@ -40,44 +39,14 @@ def _validate_json_limits(value, *, max_depth=8, max_keys=200, max_list=500, max
 
     walk(value, 1)
 
-class CrontabScheduleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = CrontabSchedule
-        fields = [
-            'id',
-            'minute',
-            'hour',
-            'day_of_week',
-            'day_of_month',
-            'month_of_year',
-            'timezone',
-        ]
-
-class PeriodicTaskSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PeriodicTask
-        fields = [
-            'id',
-            'name',
-            'task',
-            'crontab',
-            'enabled',
-            'args',
-            'kwargs',
-            'description',
-            'last_run_at',
-            'total_run_count',
-            'date_changed',
-        ]
-        read_only_fields = [
-            'task',
-            'args',
-            'kwargs',
-            'description',
-            'last_run_at',
-            'total_run_count',
-            'date_changed',
-        ]
+def _can_access_project(user, project):
+    if not user or not user.is_authenticated:
+        return False
+    if getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False):
+        return True
+    if project.owner_id == user.id:
+        return True
+    return ProjectMember.objects.filter(project=project, user=user, is_active=True).exists()
 
 class EnvConfigSerializer(serializers.ModelSerializer):
     class Meta:
@@ -114,7 +83,7 @@ class EnvConfigSerializer(serializers.ModelSerializer):
         req = self.context.get('request')
         user = getattr(req, 'user', None)
         if user and user.is_authenticated:
-            if value.owner_id != user.id:
+            if not _can_access_project(user, value):
                 raise serializers.ValidationError('无权限访问该项目')
         return value
     
@@ -183,7 +152,7 @@ class TestCaseSerializer(serializers.ModelSerializer):
         req = self.context.get('request')
         user = getattr(req, 'user', None)
         if user and user.is_authenticated:
-            if value.owner_id != user.id:
+            if not _can_access_project(user, value):
                 raise serializers.ValidationError('无权限访问该项目')
         return value
     
@@ -261,9 +230,14 @@ class TestSuiteSerializer(serializers.ModelSerializer):
 
     def get_cases_summary(self, obj):
         ids = obj.ordered_case_ids or []
-        cases = TestCase.objects.filter(id__in=ids)
-        case_map = {c.id: c.title for c in cases}
-        return [{'id': cid, 'title': case_map.get(cid, 'Unknown')} for cid in ids]
+        if not ids:
+            return []
+        # 优先使用视图层预加载的 case_cache，避免列表接口的 N+1 查询
+        case_cache = self.context.get('case_cache') or {}
+        if not case_cache:
+            cases = TestCase.objects.filter(id__in=ids).values('id', 'title')
+            case_cache = {c['id']: c['title'] for c in cases}
+        return [{'id': cid, 'title': case_cache.get(cid, 'Unknown')} for cid in ids]
     
     def validate_variables(self, value):
         if value is None:
@@ -289,9 +263,18 @@ class TestSuiteSerializer(serializers.ModelSerializer):
         req = self.context.get('request')
         user = getattr(req, 'user', None)
         if user and user.is_authenticated:
-            if value.owner_id != user.id:
+            if not _can_access_project(user, value):
                 raise serializers.ValidationError('无权限访问该项目')
         return value
+
+
+class ProjectMemberSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model = ProjectMember
+        fields = ['id', 'project', 'user', 'username', 'is_active', 'created_at']
+        read_only_fields = ['id', 'username', 'created_at']
 
 class TestRecordSerializer(serializers.ModelSerializer):
     case_title = serializers.CharField(source='case.title', read_only=True)

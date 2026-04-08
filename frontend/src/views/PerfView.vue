@@ -1,7 +1,6 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import { Monitor, DataLine, Loading, Download } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 import { apiFetch } from '../api'
 
@@ -13,6 +12,14 @@ const reportRow = ref(null)
 const report = ref(null)
 const chartRef = ref(null)
 let myChart = null
+let echartsLib = null
+
+async function ensureEcharts() {
+  if (!echartsLib) {
+    echartsLib = await import('echarts')
+  }
+  return echartsLib
+}
 
 async function loadRecords() {
   loading.value = true
@@ -27,9 +34,21 @@ async function loadRecords() {
 onMounted(loadRecords)
 
 function getStatusTag(status) {
+  if (status === 'queued') return 'info'
   if (status === 'running') return 'warning'
   if (status === 'finished') return 'success'
+  if (status === 'timeout') return 'danger'
+  if (status === 'error') return 'danger'
   return 'info'
+}
+
+function getStatusText(status) {
+  if (status === 'queued') return '排队中'
+  if (status === 'running') return '压测中'
+  if (status === 'finished') return '已完成'
+  if (status === 'timeout') return '超时'
+  if (status === 'error') return '异常'
+  return status || '未知'
 }
 
 function disposeChart() {
@@ -39,9 +58,10 @@ function disposeChart() {
   }
 }
 
-function renderChart(series) {
+async function renderChart(series) {
   if (!chartRef.value) return
   disposeChart()
+  const echarts = await ensureEcharts()
   myChart = echarts.init(chartRef.value)
 
   const x = series.map(i => new Date(i.ts * 1000).toLocaleTimeString())
@@ -80,7 +100,7 @@ async function openReport(row) {
     report.value = data
     await nextTick()
     if (Array.isArray(data.series) && data.series.length) {
-      renderChart(data.series)
+      await renderChart(data.series)
     }
   } catch (e) {
     ElMessage.error(String(e))
@@ -138,15 +158,15 @@ async function downloadLocust(row) {
       <el-table-column label="状态" width="120">
         <template #default="{ row }">
           <el-tag :type="getStatusTag(row.status)">
-            <el-icon v-if="row.status === 'running'" class="is-loading"><Loading /></el-icon>
-            {{ row.status === 'running' ? '压测中' : '已完成' }}
+            <el-icon v-if="row.status === 'running' || row.status === 'queued'" class="is-loading"><Loading /></el-icon>
+            {{ getStatusText(row.status) }}
           </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="开始时间" width="180" />
       <el-table-column label="结果/脚本" width="220" fixed="right">
         <template #default="{ row }">
-          <el-button type="success" link :disabled="row.status === 'running'" @click="openReport(row)">
+          <el-button type="success" link :disabled="row.status === 'running' || row.status === 'queued'" @click="openReport(row)">
             <el-icon><DataLine /></el-icon> 查看报告 (CSV)
           </el-button>
           <el-button type="primary" link @click="downloadLocust(row)">

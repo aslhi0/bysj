@@ -1,3 +1,17 @@
+x-django-env: &django-env
+  DJANGO_DEBUG: "true"
+  DJANGO_ALLOWED_HOSTS: "*"
+  DJANGO_CORS_ALLOW_ALL: "true"
+  DJANGO_DB_ENGINE: "postgres"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "autotest"
+  POSTGRES_USER: "autotest"
+  POSTGRES_PASSWORD: "autotest"
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+  CELERY_ALWAYS_EAGER: "false"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -32,18 +46,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      DJANGO_DEBUG: "true"
-      DJANGO_ALLOWED_HOSTS: "*"
-      DJANGO_CORS_ALLOW_ALL: "true"
-      DJANGO_DB_ENGINE: "postgres"
-      POSTGRES_HOST: "postgres"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "autotest"
-      POSTGRES_USER: "autotest"
-      POSTGRES_PASSWORD: "autotest"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
-      CELERY_ALWAYS_EAGER: "false"
+      <<: *django-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,18 +75,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      DJANGO_DEBUG: "true"
-      DJANGO_ALLOWED_HOSTS: "*"
-      DJANGO_CORS_ALLOW_ALL: "true"
-      DJANGO_DB_ENGINE: "postgres"
-      POSTGRES_HOST: "postgres"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "autotest"
-      POSTGRES_USER: "autotest"
-      POSTGRES_PASSWORD: "autotest"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
-      CELERY_ALWAYS_EAGER: "false"
+      <<: *django-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,18 +92,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      DJANGO_DEBUG: "true"
-      DJANGO_ALLOWED_HOSTS: "*"
-      DJANGO_CORS_ALLOW_ALL: "true"
-      DJANGO_DB_ENGINE: "postgres"
-      POSTGRES_HOST: "postgres"
-      POSTGRES_PORT: "5432"
-      POSTGRES_DB: "autotest"
-      POSTGRES_USER: "autotest"
-      POSTGRES_PASSWORD: "autotest"
-      CELERY_BROKER_URL: "redis://redis:6379/0"
-      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
-      CELERY_ALWAYS_EAGER: "false"
+      <<: *django-env
     depends_on:
       postgres:
         condition: service_healthy
