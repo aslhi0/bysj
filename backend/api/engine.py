@@ -112,14 +112,82 @@ class TestEngine:
                 return default
         return default
 
+    def _parse_path_tokens(self, path, max_depth=20):
+        """Parse dotted/bracket path to tokens.
+
+        Supported forms:
+        - user.profile.name
+        - items[0].id
+        - data["a.b"].value
+        - data['x-y'][1]
+        """
+        text = str(path or "").strip()
+        if not text:
+            return []
+
+        tokens = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == ".":
+                i += 1
+                continue
+            if ch == "[":
+                j = i + 1
+                if j < n and text[j] in {"'", '"'}:
+                    quote = text[j]
+                    j += 1
+                    buf = []
+                    while j < n:
+                        c = text[j]
+                        if c == "\\" and j + 1 < n:
+                            buf.append(text[j + 1])
+                            j += 2
+                            continue
+                        if c == quote:
+                            break
+                        buf.append(c)
+                        j += 1
+                    if j >= n or j + 1 >= n or text[j + 1] != "]":
+                        raise ValueError("path 语法错误")
+                    tokens.append("".join(buf))
+                    i = j + 2
+                    continue
+                buf = []
+                while j < n and text[j] != "]":
+                    buf.append(text[j])
+                    j += 1
+                if j >= n:
+                    raise ValueError("path 语法错误")
+                inner = "".join(buf).strip()
+                if not inner:
+                    raise ValueError("path 语法错误")
+                if inner.isdigit():
+                    tokens.append(int(inner))
+                else:
+                    tokens.append(inner)
+                i = j + 1
+                continue
+
+            j = i
+            while j < n and text[j] not in ".[":
+                j += 1
+            token = text[i:j].strip()
+            if token:
+                tokens.append(token)
+            i = j
+
+        if len(tokens) > int(max_depth):
+            raise ValueError("path 深度过大")
+        return tokens
+
     def get_by_path(self, obj, path, max_depth=20):
         if obj is None:
             return None
         if not path:
             return obj
-        parts = str(path).split('.')
-        if len(parts) > int(max_depth):
-            raise ValueError('path 深度过大')
+        parts = self._parse_path_tokens(path, max_depth=max_depth)
         cur = obj
         for part in parts:
             if cur is None:
@@ -128,12 +196,15 @@ class TestEngine:
                 cur = cur.get(part)
                 continue
             if isinstance(cur, list):
-                if part.isdigit():
+                idx = None
+                if isinstance(part, int):
+                    idx = part
+                elif isinstance(part, str) and part.isdigit():
                     idx = int(part)
-                    if 0 <= idx < len(cur):
-                        cur = cur[idx]
-                    else:
-                        return None
+                if idx is None:
+                    return None
+                if 0 <= idx < len(cur):
+                    cur = cur[idx]
                     continue
                 return None
             return None
@@ -308,8 +379,16 @@ class TestEngine:
             res = False
             if operator == 'eq':
                 res = str(actual) == str(expected)
+            elif operator in {'ne', 'neq'}:
+                res = str(actual) != str(expected)
             elif operator == 'contains':
                 res = str(expected) in str(actual)
+            elif operator == 'regex':
+                try:
+                    res = re.search(str(expected), str(actual) if actual is not None else '') is not None
+                except re.error:
+                    self.add_log(f"断言异常: 非法正则表达式 {expected}")
+                    res = False
             elif operator == 'gt':
                 try:
                     res = float(actual) > float(expected)
@@ -364,9 +443,25 @@ class TestEngine:
             db_name = str(db_name)
             if os.path.isabs(db_name):
                 raise ValueError('禁止使用绝对 sqlite_path')
-            abs_db = os.path.normpath(os.path.join(base_dir, os.path.normpath(db_name)))
-            base_norm = os.path.normpath(base_dir)
-            if not abs_db.startswith(base_norm + os.sep) and abs_db != base_norm:
+
+            # 严格防止路径遍历攻击
+            # 1. 规范化 base_dir (解析符号链接)
+            base_norm = os.path.realpath(base_dir)
+
+            # 2. 检查 db_name 中是否包含危险字符
+            if '..' in db_name or db_name.startswith('/') or db_name.startswith('\\'):
+                raise ValueError('sqlite_path 包含非法路径字符')
+
+            # 3. 拼接路径并规范化 (解析所有 ../ 和符号链接)
+            abs_db = os.path.realpath(os.path.join(base_dir, db_name))
+
+            # 4. 使用 os.path.commonpath 严格校验路径是否在 base_dir 内
+            try:
+                common = os.path.commonpath([base_norm, abs_db])
+                if common != base_norm:
+                    raise ValueError('sqlite_path 越界')
+            except ValueError:
+                # Windows 下不同盘符会抛出 ValueError
                 raise ValueError('sqlite_path 越界')
             conn = sqlite3.connect(abs_db)
             cursor = conn.cursor()

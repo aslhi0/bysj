@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
 import { Monitor, DataLine, Loading, Download } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiFetch } from '../api'
 
 const loading = ref(false)
@@ -137,6 +137,31 @@ async function downloadLocust(row) {
     ElMessage.error(String(e))
   }
 }
+
+async function removeRecord(row) {
+  if (row.status === 'running' || row.status === 'queued') {
+    ElMessage.warning('压测进行中，暂不支持删除该记录')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除压测记录 #${row.id} 吗？此操作会同时删除对应 CSV 文件。`,
+      '删除确认',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  const res = await apiFetch(`/api/perf-records/${row.id}/`, { method: 'DELETE' })
+  if (res.ok) {
+    ElMessage.success('压测记录已删除')
+    await loadRecords()
+  } else {
+    const data = await res.json().catch(() => ({}))
+    ElMessage.error(data.detail || '删除失败')
+  }
+}
 </script>
 
 <template>
@@ -164,13 +189,16 @@ async function downloadLocust(row) {
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="开始时间" width="180" />
-      <el-table-column label="结果/脚本" width="220" fixed="right">
+      <el-table-column label="结果/脚本" width="300" fixed="right">
         <template #default="{ row }">
           <el-button type="success" link :disabled="row.status === 'running' || row.status === 'queued'" @click="openReport(row)">
             <el-icon><DataLine /></el-icon> 查看报告 (CSV)
           </el-button>
           <el-button type="primary" link @click="downloadLocust(row)">
             <el-icon><Download /></el-icon> 下载 Locust
+          </el-button>
+          <el-button type="danger" link :disabled="row.status === 'running' || row.status === 'queued'" @click="removeRecord(row)">
+            删除记录
           </el-button>
         </template>
       </el-table-column>

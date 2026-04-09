@@ -1,9 +1,10 @@
 """Read-only viewsets for records, suite runs and performance reports."""
 import os
+import shutil
 
 from django.conf import settings
 from django.http import HttpResponse
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, mixins
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -97,7 +98,7 @@ class SuiteRunViewSet(viewsets.ReadOnlyModelViewSet):
         return resp
 
 
-class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
+class PerfRecordViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet):
     queryset = PerfRecord.objects.select_related("case", "case__project", "case__project__owner").all().order_by("-created_at")
     serializer_class = PerfRecordSerializer
     permission_classes = [IsAuthenticated]
@@ -111,6 +112,11 @@ class PerfRecordViewSet(viewsets.ReadOnlyModelViewSet):
         qs = super().get_queryset()
         user = self.request.user
         return apply_project_access_filter(qs, user, "case__project").order_by("-created_at")
+
+    def perform_destroy(self, instance):
+        perf_dir = os.path.join(str(getattr(settings, "MEDIA_ROOT", os.getcwd())), "perf", str(instance.id))
+        instance.delete()
+        shutil.rmtree(perf_dir, ignore_errors=True)
 
     @action(detail=True, methods=["get"])
     def report(self, request, pk=None):

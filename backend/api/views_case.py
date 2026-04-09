@@ -1,6 +1,7 @@
 """TestCase viewset and related actions."""
 from datetime import timedelta
 import json
+import math
 import os
 import re
 import time
@@ -78,6 +79,121 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         next_v = (last or 0) + 1
         TestCaseVersion.objects.create(case=case, version=next_v, snapshot=self.build_case_snapshot(case), created_by=user)
 
+    def _resolve_env_id(self, case, env_id):
+        if env_id:
+            env_id = EnvConfig.objects.filter(project=case.project, id=env_id).values_list("id", flat=True).first()
+        if not env_id:
+            env = EnvConfig.objects.filter(project=case.project, is_default=True).order_by("-created_at").first()
+            if env is not None:
+                env_id = env.id
+        return env_id
+
+    def _compute_flaky_analysis(self, case, *, target_success=0.95, max_attempts=3):
+        recent_records = list(case.records.all().order_by("-created_at")[:30])
+        if not recent_records:
+            return {
+                "sample_size": 0,
+                "flaky_score": 0,
+                "risk_level": "unknown",
+                "failure_rate": 0.0,
+                "ewma_failure": 0.0,
+                "transition_rate": 0.0,
+                "wilson_failure_upper": 0.0,
+                "suggested_retries": 0,
+                "suggested_attempts": 1,
+                "projections": [],
+                "message": "暂无执行样本，请先运行该用例后再分析。",
+                "meta": {
+                    "target_success": float(target_success),
+                    "max_attempts": int(max_attempts),
+                },
+            }
+
+        timeline = list(reversed(recent_records))
+        seq = []
+        for r in timeline:
+            seq.append(1 if r.status in {"failed", "error"} else 0)
+        n = len(seq)
+        fail_count = sum(seq)
+        failure_rate = fail_count / n if n else 0.0
+
+        alpha = 0.35
+        ewma = seq[0] if seq else 0.0
+        for x in seq[1:]:
+            ewma = alpha * x + (1 - alpha) * ewma
+
+        transitions = 0
+        for i in range(1, n):
+            if seq[i] != seq[i - 1]:
+                transitions += 1
+        transition_rate = transitions / (n - 1) if n > 1 else 0.0
+
+        z = 1.96
+        if n > 0:
+            p = failure_rate
+            denom = 1 + (z * z) / n
+            center = (p + (z * z) / (2 * n)) / denom
+            margin = (
+                z
+                * math.sqrt((p * (1 - p) + (z * z) / (4 * n)) / n)
+                / denom
+            )
+            wilson_upper = min(1.0, max(0.0, center + margin))
+        else:
+            wilson_upper = 0.0
+
+        flaky_score = int(
+            round(
+                min(
+                    100.0,
+                    max(
+                        0.0,
+                        100.0
+                        * (0.50 * wilson_upper + 0.30 * transition_rate + 0.20 * ewma),
+                    ),
+                )
+            )
+        )
+
+        if flaky_score >= 70:
+            risk_level = "high"
+        elif flaky_score >= 45:
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+
+        projections = []
+        suggested_attempts = int(max_attempts)
+        for attempts in range(1, int(max_attempts) + 1):
+            projected_success = 1 - (wilson_upper ** attempts)
+            projections.append(
+                {
+                    "attempts": attempts,
+                    "projected_success": round(projected_success, 4),
+                }
+            )
+            if projected_success >= float(target_success) and suggested_attempts == int(max_attempts):
+                suggested_attempts = attempts
+
+        suggested_retries = max(0, suggested_attempts - 1)
+        return {
+            "sample_size": n,
+            "flaky_score": flaky_score,
+            "risk_level": risk_level,
+            "failure_rate": round(failure_rate, 4),
+            "ewma_failure": round(float(ewma), 4),
+            "transition_rate": round(transition_rate, 4),
+            "wilson_failure_upper": round(wilson_upper, 4),
+            "suggested_retries": suggested_retries,
+            "suggested_attempts": suggested_attempts,
+            "projections": projections,
+            "message": "分值越高表示该用例近期越不稳定；建议按预测成功率动态设置重试次数。",
+            "meta": {
+                "target_success": float(target_success),
+                "max_attempts": int(max_attempts),
+            },
+        }
+
     def perform_create(self, serializer):
         self._ensure_admin()
         case = serializer.save()
@@ -130,21 +246,77 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     def run(self, request, pk=None):
         case = self.get_object()
         extra_vars = request.data.get("variables", {})
-        env_id = request.data.get("env_id")
-        if env_id:
-            env_id = EnvConfig.objects.filter(project=case.project, id=env_id).values_list("id", flat=True).first()
-        if not env_id:
-            env = EnvConfig.objects.filter(project=case.project, is_default=True).order_by("-created_at").first()
-            if env is not None:
-                env_id = env.id
+        retry_times = request.data.get("retry_times", 0)
+        try:
+            retry_times = int(retry_times)
+        except Exception:
+            retry_times = 0
+        if retry_times < 0 or retry_times > 3:
+            return Response({"detail": "retry_times 超出范围（0-3）"}, status=status.HTTP_400_BAD_REQUEST)
+        env_id = self._resolve_env_id(case, request.data.get("env_id"))
 
-        task = run_test_case_task.delay(case.id, env_id, extra_vars)
+        task = run_test_case_task.delay(case.id, env_id, extra_vars, retry_times)
         bind_task_owner(task.id, request.user.id)
-        return Response({"status": "pending", "task_id": task.id, "message": "测试任务已进入队列"})
+        return Response(
+            {
+                "status": "pending",
+                "task_id": task.id,
+                "message": "测试任务已进入队列",
+                "retry_times": retry_times,
+                "max_attempts": retry_times + 1,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def run_smart(self, request, pk=None):
+        """Use flaky analysis to choose retry strategy then enqueue."""
+        case = self.get_object()
+        extra_vars = request.data.get("variables", {})
+        env_id = self._resolve_env_id(case, request.data.get("env_id"))
+
+        try:
+            target_success = float(request.data.get("target_success", 0.95))
+        except Exception:
+            target_success = 0.95
+        target_success = max(0.80, min(target_success, 0.99))
+
+        try:
+            max_attempts = int(request.data.get("max_attempts", 3))
+        except Exception:
+            max_attempts = 3
+        max_attempts = max(1, min(max_attempts, 4))
+
+        strategy = self._compute_flaky_analysis(
+            case,
+            target_success=target_success,
+            max_attempts=max_attempts,
+        )
+        retry_times = int(strategy.get("suggested_retries", 0))
+        retry_times = max(0, min(retry_times, 3))
+
+        task = run_test_case_task.delay(case.id, env_id, extra_vars, retry_times)
+        bind_task_owner(task.id, request.user.id)
+        return Response(
+            {
+                "status": "pending",
+                "task_id": task.id,
+                "message": "智能重试任务已进入队列",
+                "retry_times": retry_times,
+                "max_attempts": retry_times + 1,
+                "strategy": strategy,
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def run_perf(self, request, pk=None):
         case = self.get_object()
+        steps = case.steps if isinstance(case.steps, list) else []
+        has_http_step = any(isinstance(step, dict) and step.get("type") == "http" for step in steps)
+        if not has_http_step:
+            return Response(
+                {"detail": "压测仅支持包含 HTTP 步骤的用例；当前用例为 UI 流程，无法生成有效 RPS。"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         users = request.data.get("users", 10)
         spawn_rate = request.data.get("spawn_rate", 1)
         duration = request.data.get("duration", "60s")
@@ -224,6 +396,156 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         serializer = TestRecordSerializer(records, many=True)
         return Response(serializer.data)
 
+    @action(detail=True, methods=["get"])
+    def quality_insight(self, request, pk=None):
+        """Explainable quality score for demo/reporting in UI."""
+        case = self.get_object()
+        steps = case.steps if isinstance(case.steps, list) else []
+
+        http_steps = [s for s in steps if isinstance(s, dict) and s.get("type") == "http"]
+        ui_steps = [s for s in steps if isinstance(s, dict) and s.get("type") == "ui"]
+        total_steps = len(steps)
+
+        http_count = len(http_steps)
+        ui_count = len(ui_steps)
+        mixed_bonus = 10 if http_count and ui_count else 0
+
+        http_with_assert = sum(1 for s in http_steps if isinstance(s.get("assertions"), list) and s.get("assertions"))
+        http_with_capture = sum(1 for s in http_steps if isinstance(s.get("capture"), dict) and s.get("capture"))
+        ui_wait_steps = sum(1 for s in ui_steps if s.get("action") == "wait_visible")
+
+        assert_ratio = (http_with_assert / http_count) if http_count else 1.0
+        capture_ratio = (http_with_capture / http_count) if http_count else 1.0
+        ui_wait_ratio = (ui_wait_steps / ui_count) if ui_count else 1.0
+
+        design_score = int(
+            max(
+                0,
+                min(
+                    100,
+                    40 * assert_ratio + 30 * capture_ratio + 20 * ui_wait_ratio + mixed_bonus,
+                ),
+            )
+        )
+
+        recent_records = list(case.records.all().order_by("-created_at")[:20])
+        rec_total = len(recent_records)
+        rec_success = sum(1 for r in recent_records if r.status == "success")
+        rec_fail = sum(1 for r in recent_records if r.status in {"failed", "error"})
+        success_rate = (rec_success / rec_total) if rec_total else 0.0
+        avg_elapsed = (sum(float(r.elapsed_time or 0.0) for r in recent_records) / rec_total) if rec_total else 0.0
+        elapsed_penalty = 0
+        if avg_elapsed > 10:
+            elapsed_penalty = min(20, int(avg_elapsed - 10))
+        reliability_score = int(max(0, min(100, 100 * success_rate - elapsed_penalty)))
+
+        recent_perf = list(case.perf_records.all().order_by("-created_at")[:10])
+        perf_total = len(recent_perf)
+        perf_good = sum(1 for p in recent_perf if p.status == "finished")
+        perf_bad = sum(1 for p in recent_perf if p.status in {"error", "timeout"})
+        perf_rate = (perf_good / perf_total) if perf_total else 0.0
+        has_tags = 1 if isinstance(case.tags, list) and case.tags else 0
+        has_vars = 1 if isinstance(case.variables, dict) and case.variables else 0
+        operability_score = int(
+            max(
+                0,
+                min(
+                    100,
+                    30 * has_tags + 20 * has_vars + 20 * perf_rate + 30 * (1 if total_steps > 0 else 0),
+                ),
+            )
+        )
+
+        overall = int(round(0.45 * design_score + 0.40 * reliability_score + 0.15 * operability_score))
+        if overall >= 85:
+            level = "A"
+            level_label = "优秀"
+        elif overall >= 70:
+            level = "B"
+            level_label = "良好"
+        elif overall >= 55:
+            level = "C"
+            level_label = "可改进"
+        else:
+            level = "D"
+            level_label = "高风险"
+
+        suggestions = []
+        if http_count and assert_ratio < 0.7:
+            suggestions.append("HTTP 步骤断言覆盖较低，建议补充状态码/JSON/Schema 断言。")
+        if http_count and capture_ratio < 0.3:
+            suggestions.append("建议增加变量提取(capture)用于链路校验，提高业务真实性。")
+        if ui_count and ui_wait_ratio < 0.3:
+            suggestions.append("UI 步骤缺少 wait_visible，建议增加显式等待提升稳定性。")
+        if rec_total < 3:
+            suggestions.append("执行样本不足，建议至少运行 3~5 次后再评估稳定性。")
+        if rec_total >= 3 and success_rate < 0.8:
+            suggestions.append("近期成功率偏低，建议排查环境波动和断言过严的问题。")
+        if perf_total == 0 and http_count:
+            suggestions.append("尚无压测基线，建议对关键 HTTP 用例进行一次性能测试。")
+        if not suggestions:
+            suggestions.append("该用例设计较完整，可继续扩大样本规模形成基线数据。")
+
+        return Response(
+            {
+                "case_id": case.id,
+                "case_title": case.title,
+                "overall_score": overall,
+                "level": level,
+                "level_label": level_label,
+                "dimensions": {
+                    "design_score": design_score,
+                    "reliability_score": reliability_score,
+                    "operability_score": operability_score,
+                },
+                "metrics": {
+                    "steps_total": total_steps,
+                    "http_steps": http_count,
+                    "ui_steps": ui_count,
+                    "assertion_coverage": round(assert_ratio, 4),
+                    "capture_coverage": round(capture_ratio, 4),
+                    "ui_wait_coverage": round(ui_wait_ratio, 4),
+                    "recent_run_total": rec_total,
+                    "recent_run_success": rec_success,
+                    "recent_run_failed": rec_fail,
+                    "recent_success_rate": round(success_rate, 4),
+                    "recent_avg_elapsed": round(avg_elapsed, 4),
+                    "recent_perf_total": perf_total,
+                    "recent_perf_finished": perf_good,
+                    "recent_perf_bad": perf_bad,
+                },
+                "suggestions": suggestions,
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def flaky_insight(self, request, pk=None):
+        """Flaky risk analysis via Wilson interval + EWMA trend."""
+        case = self.get_object()
+        try:
+            target_success = float(request.query_params.get("target_success", 0.95))
+        except Exception:
+            target_success = 0.95
+        target_success = max(0.80, min(target_success, 0.99))
+        try:
+            max_attempts = int(request.query_params.get("max_attempts", 3))
+        except Exception:
+            max_attempts = 3
+        max_attempts = max(1, min(max_attempts, 4))
+
+        data = self._compute_flaky_analysis(
+            case,
+            target_success=target_success,
+            max_attempts=max_attempts,
+        )
+        return Response(
+            {
+                "case_id": case.id,
+                "case_title": case.title,
+                **data,
+            }
+        )
+
     @action(detail=False, methods=["post"], url_path="import-openapi")
     def import_openapi(self, request):
         self._ensure_admin()
@@ -302,40 +624,88 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         count = 0
         allowed_methods = {"get", "post", "put", "delete", "patch", "head", "options"}
 
-        def _from_schema(schema_obj):
+        def _resolve_ref(ref):
+            if not isinstance(ref, str) or not ref.startswith("#/"):
+                return {}
+            node = spec
+            for p in ref[2:].split("/"):
+                if not isinstance(node, dict):
+                    return {}
+                node = node.get(p)
+            return node if isinstance(node, dict) else {}
+
+        def _from_schema(schema_obj, depth=0, seen_refs=None):
+            """Build a request body skeleton from OpenAPI schema recursively."""
             if not isinstance(schema_obj, dict):
                 return {}
+            if depth > 8:
+                return {}
+            seen_refs = seen_refs or set()
+
+            if "example" in schema_obj:
+                return schema_obj.get("example")
+            if "default" in schema_obj:
+                return schema_obj.get("default")
+            enum_vals = schema_obj.get("enum")
+            if isinstance(enum_vals, list) and enum_vals:
+                return enum_vals[0]
+
+            ref = schema_obj.get("$ref")
+            if isinstance(ref, str):
+                if ref in seen_refs:
+                    return {}
+                target = _resolve_ref(ref)
+                return _from_schema(target, depth + 1, seen_refs | {ref})
+
+            for key in ("oneOf", "anyOf"):
+                variants = schema_obj.get(key)
+                if isinstance(variants, list) and variants:
+                    candidate = variants[0] if isinstance(variants[0], dict) else {}
+                    return _from_schema(candidate, depth + 1, seen_refs)
+            all_of = schema_obj.get("allOf")
+            if isinstance(all_of, list) and all_of:
+                merged = {}
+                for part in all_of:
+                    v = _from_schema(part if isinstance(part, dict) else {}, depth + 1, seen_refs)
+                    if isinstance(v, dict):
+                        merged.update(v)
+                if merged:
+                    return merged
+
             typ = schema_obj.get("type")
-            if typ == "object":
+            fmt = str(schema_obj.get("format", "")).lower()
+            if typ == "object" or (typ is None and isinstance(schema_obj.get("properties"), dict)):
                 props = schema_obj.get("properties", {})
                 if not isinstance(props, dict):
                     return {}
                 result = {}
                 for k, sub in props.items():
                     if isinstance(sub, dict):
-                        if "example" in sub:
-                            result[k] = sub.get("example")
-                        elif "default" in sub:
-                            result[k] = sub.get("default")
-                        else:
-                            st = sub.get("type")
-                            if st == "integer":
-                                result[k] = 0
-                            elif st == "number":
-                                result[k] = 0
-                            elif st == "boolean":
-                                result[k] = False
-                            elif st == "array":
-                                result[k] = []
-                            elif st == "object":
-                                result[k] = {}
-                            else:
-                                result[k] = ""
+                        result[k] = _from_schema(sub, depth + 1, seen_refs)
                     else:
                         result[k] = ""
                 return result
             if typ == "array":
+                items = schema_obj.get("items")
+                if isinstance(items, dict):
+                    return [_from_schema(items, depth + 1, seen_refs)]
                 return []
+            if typ == "integer":
+                return 0
+            if typ == "number":
+                return 0
+            if typ == "boolean":
+                return False
+            if typ == "string":
+                if fmt in {"date-time"}:
+                    return "2026-01-01T00:00:00Z"
+                if fmt in {"date"}:
+                    return "2026-01-01"
+                if fmt in {"email"}:
+                    return "demo@example.com"
+                if fmt in {"uuid"}:
+                    return "00000000-0000-0000-0000-000000000000"
+                return ""
             return {}
 
         for path, methods in paths.items():

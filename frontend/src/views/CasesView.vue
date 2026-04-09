@@ -5,6 +5,7 @@ import { ArrowDown, ArrowUp, Delete, Picture, Search } from '@element-plus/icons
 import { apiFetch } from '../api'
 import { useCurrentUser } from '../auth'
 import PageToolbar from '../components/PageToolbar.vue'
+import CaseInsightDialog from '../components/CaseInsightDialog.vue'
 
 const loading = ref(false)
 const runLoading = ref(false)
@@ -15,6 +16,14 @@ const screenshotDialogVisible = ref(false)
 const screenshotUrl = ref('')
 const perfDialogVisible = ref(false)
 const perfSubmitting = ref(false)
+const qualityDialogVisible = ref(false)
+const qualityLoading = ref(false)
+const qualityTitle = ref('')
+const qualityData = ref(null)
+const flakyDialogVisible = ref(false)
+const flakyLoading = ref(false)
+const flakyTitle = ref('')
+const flakyData = ref(null)
 const perfForm = reactive({
   id: null,
   title: '',
@@ -88,7 +97,9 @@ const ASSERT_SOURCES = [
 ]
 const ASSERT_OPERATORS = [
   { label: '等于', value: 'eq' },
+  { label: '不等于', value: 'ne' },
   { label: '包含', value: 'contains' },
+  { label: '正则匹配', value: 'regex' },
   { label: '大于', value: 'gt' },
   { label: '小于', value: 'lt' },
   { label: 'Schema校验', value: 'validate' },
@@ -184,6 +195,11 @@ const projectOptions = computed(() =>
 function stepCount(row) {
   const s = row.steps
   return Array.isArray(s) ? s.length : 0
+}
+
+function canRunPerf(row) {
+  const s = row?.steps
+  return Array.isArray(s) && s.some((step) => step && step.type === 'http')
 }
 
 async function loadProjects() {
@@ -524,10 +540,81 @@ function showScreenshot(url) {
 }
 
 function openPerfDialog(row) {
+  if (!canRunPerf(row)) {
+    ElMessage.warning('该用例仅包含 UI 步骤，无法生成有效压测报告，请选择包含 HTTP 步骤的用例')
+    return
+  }
   perfForm.id = row.id
   perfForm.title = row.title
   perfSubmitting.value = false
   perfDialogVisible.value = true
+}
+
+async function openQualityDialog(row) {
+  qualityDialogVisible.value = true
+  qualityLoading.value = true
+  qualityTitle.value = row.title
+  qualityData.value = null
+  try {
+    const res = await apiFetch(`/api/cases/${row.id}/quality_insight/`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      ElMessage.error(data.detail || '质量评估失败')
+      return
+    }
+    qualityData.value = data
+  } catch (e) {
+    ElMessage.error(String(e))
+  } finally {
+    qualityLoading.value = false
+  }
+}
+
+async function openFlakyDialog(row) {
+  flakyDialogVisible.value = true
+  flakyLoading.value = true
+  flakyTitle.value = row.title
+  flakyData.value = null
+  try {
+    const res = await apiFetch(`/api/cases/${row.id}/flaky_insight/`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      ElMessage.error(data.detail || '波动分析失败')
+      return
+    }
+    flakyData.value = data
+  } catch (e) {
+    ElMessage.error(String(e))
+  } finally {
+    flakyLoading.value = false
+  }
+}
+
+async function runCaseSmartRetry(row) {
+  if (runLoading.value) return
+  runLoading.value = true
+  try {
+    const res = await apiFetch(`/api/cases/${row.id}/run_smart/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        env_id: selectedEnvId.value,
+      })
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      ElMessage.error(data.detail || '智能重试执行失败')
+      runLoading.value = false
+      return
+    }
+    const retryTimes = Number(data.retry_times || 0)
+    const attempts = Number(data.max_attempts || (retryTimes + 1))
+    ElMessage.info(`智能策略已应用：最多执行 ${attempts} 次（重试 ${retryTimes} 次）`)
+    pollTaskStatus(data.task_id, `${row.title}（智能重试）`)
+  } catch (e) {
+    ElMessage.error(String(e))
+    runLoading.value = false
+  }
 }
 
 async function submitPerf() {
@@ -560,19 +647,25 @@ async function submitPerf() {
   }
 }
 
-async function runCase(row) {
+async function runCase(row, retryTimes = 0) {
   runLoading.value = true
   try {
     const res = await apiFetch(`/api/cases/${row.id}/run/`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        env_id: selectedEnvId.value
+        env_id: selectedEnvId.value,
+        retry_times: retryTimes,
       })
     })
     const taskData = await res.json()
     if (taskData.status === 'pending') {
-      ElMessage.info('任务已提交，后台执行中...')
+      const rt = Number(taskData.retry_times || 0)
+      if (rt > 0) {
+        ElMessage.info(`任务已提交，后台执行中（最多执行 ${rt + 1} 次）...`)
+      } else {
+        ElMessage.info('任务已提交，后台执行中...')
+      }
       pollTaskStatus(taskData.task_id, row.title)
     }
   } catch (e) {
@@ -663,10 +756,13 @@ async function pollTaskStatus(taskId, title) {
         </template>
       </el-table-column>
       <el-table-column prop="updated_at" label="更新时间" width="180" />
-          <el-table-column :width="isAdminUser ? 350 : 220" label="操作" fixed="right">
+          <el-table-column :width="isAdminUser ? 610 : 470" label="操作" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link :disabled="runLoading" @click="runCase(row)">立即执行</el-button>
-              <el-button type="success" link :disabled="runLoading" @click="openPerfDialog(row)">压测</el-button>
+              <el-button type="success" link :disabled="runLoading" @click="runCaseSmartRetry(row)">智能重试执行</el-button>
+              <el-button type="success" link :disabled="runLoading || !canRunPerf(row)" @click="openPerfDialog(row)">压测</el-button>
+              <el-button type="info" link :disabled="runLoading" @click="openQualityDialog(row)">质量评分</el-button>
+              <el-button type="warning" link :disabled="runLoading" @click="openFlakyDialog(row)">波动分析</el-button>
               <el-button v-if="isAdminUser" type="primary" link :disabled="runLoading" @click="openEdit(row)">编辑</el-button>
               <el-button type="info" link :disabled="runLoading" @click="openCaseHistory(row)">执行历史</el-button>
               <el-button type="warning" link :disabled="runLoading" @click="openCaseVersions(row)">版本</el-button>
@@ -674,6 +770,22 @@ async function pollTaskStatus(taskId, title) {
             </template>
           </el-table-column>
     </el-table>
+
+    <CaseInsightDialog
+      v-model:visible="flakyDialogVisible"
+      :loading="flakyLoading"
+      :title="`波动分析器 — ${flakyTitle}`"
+      mode="flaky"
+      :data="flakyData"
+    />
+
+    <CaseInsightDialog
+      v-model:visible="qualityDialogVisible"
+      :loading="qualityLoading"
+      :title="`质量评分卡 — ${qualityTitle}`"
+      mode="quality"
+      :data="qualityData"
+    />
 
     <el-dialog
       v-model="historyDialogVisible"

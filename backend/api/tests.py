@@ -171,6 +171,32 @@ class TestIntegrationTasks(DjangoTestCase):
         self.assertEqual(len(called_urls), 2)
         self.assertIn('tag=u-1', called_urls[1])
 
+    def test_run_test_case_task_retries_until_success(self):
+        from django.contrib.auth import get_user_model
+        from unittest.mock import Mock
+
+        user = get_user_model().objects.create_user(username='u1r', password='p1')
+        project = Project.objects.create(name='p1r', owner=user)
+        env = EnvConfig.objects.create(
+            project=project,
+            name='env',
+            base_url='https://httpbin.org',
+            variables={},
+            is_default=True,
+        )
+        case = DbTestCase.objects.create(project=project, title='case', status='active', steps=[])
+
+        rec_fail = Mock(status='failed', id=101, elapsed_time=1.0)
+        rec_ok = Mock(status='success', id=102, elapsed_time=1.1)
+
+        with patch('api.tasks._execute_case_once', side_effect=[(rec_fail, None, None), (rec_ok, None, None)]):
+            result = run_test_case_task(case.id, env.id, {}, retry_times=2)
+
+        self.assertEqual(result.get('status'), 'success')
+        self.assertEqual(result.get('record_id'), 102)
+        self.assertEqual(result.get('attempts'), 3)
+        self.assertEqual(result.get('retries_used'), 1)
+
     def test_run_test_suite_task_propagates_variables_across_cases(self):
         from django.contrib.auth import get_user_model
         user = get_user_model().objects.create_user(username='u2', password='p2')
@@ -615,7 +641,10 @@ class TestLocustCodegen(TestCase):
         ]
         code = generate_locust_code(case, base_url='https://example.com', variables={})
         self.assertIn('from locust import HttpUser', code)
-        self.assertIn('self.client.request("GET", "/ping"', code)
+        self.assertTrue(
+            'self.client.request("GET", "/ping"' in code
+            or "self.client.request('GET', '/ping'" in code
+        )
         self.assertIn('example.com', code)
 
 
@@ -990,6 +1019,87 @@ class TestViewSetIntegration(DjangoTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data.get('task_id'), 'fake-task-id')
         m_task.delay.assert_called_once()
+        called = m_task.delay.call_args
+        self.assertEqual(called.args[0], case.id)
+        self.assertEqual(called.args[2], {})
+        self.assertEqual(called.args[3], 0)
+
+    def test_case_run_accepts_retry_times(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('rq2', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        env = EnvConfig.objects.create(
+            project=project, name='e', base_url='https://example.com', variables={}, is_default=True
+        )
+        case = DbTestCase.objects.create(project=project, title='c', status='active', steps=[])
+
+        factory = APIRequestFactory()
+        req = factory.post(f'/api/cases/{case.id}/run/', {'retry_times': 2}, format='json')
+        force_authenticate(req, user=user)
+        with patch('api.views_case.run_test_case_task') as m_task:
+            m_task.delay.return_value = MagicMock(id='fake-task-id')
+            resp = api_views.TestCaseViewSet.as_view({'post': 'run'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get('retry_times'), 2)
+        m_task.delay.assert_called_once_with(case.id, env.id, {}, 2)
+
+    def test_case_run_rejects_retry_times_out_of_range(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('rq3', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        DbTestCase.objects.create(project=project, title='c', status='active', steps=[])
+        case = DbTestCase.objects.filter(project=project).first()
+
+        factory = APIRequestFactory()
+        req = factory.post(f'/api/cases/{case.id}/run/', {'retry_times': 9}, format='json')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'run'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 400)
+
+    def test_case_run_smart_enqueues_with_strategy(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('rq4', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        env = EnvConfig.objects.create(
+            project=project, name='e', base_url='https://example.com', variables={}, is_default=True
+        )
+        case = DbTestCase.objects.create(
+            project=project,
+            title='smart',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '/ping'}],
+        )
+        # 制造波动样本
+        case.records.create(status='success', result_log='', step_results=[], elapsed_time=1.0)
+        case.records.create(status='failed', result_log='', step_results=[], elapsed_time=1.1)
+        case.records.create(status='success', result_log='', step_results=[], elapsed_time=1.2)
+        case.records.create(status='error', result_log='', step_results=[], elapsed_time=1.3)
+
+        factory = APIRequestFactory()
+        req = factory.post(
+            f'/api/cases/{case.id}/run_smart/',
+            {'target_success': 0.9, 'max_attempts': 4},
+            format='json',
+        )
+        force_authenticate(req, user=user)
+        with patch('api.views_case.run_test_case_task') as m_task:
+            m_task.delay.return_value = MagicMock(id='smart-task-id')
+            resp = api_views.TestCaseViewSet.as_view({'post': 'run_smart'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.get('task_id'), 'smart-task-id')
+        self.assertIn('strategy', resp.data)
+        self.assertIn('retry_times', resp.data)
+        called = m_task.delay.call_args
+        self.assertEqual(called.args[0], case.id)
+        self.assertEqual(called.args[1], env.id)
+        self.assertEqual(called.args[2], {})
+        self.assertTrue(0 <= int(called.args[3]) <= 3)
 
     def test_run_perf_rejects_invalid_duration(self):
         from django.contrib.auth import get_user_model
@@ -1000,7 +1110,12 @@ class TestViewSetIntegration(DjangoTestCase):
         EnvConfig.objects.create(
             project=project, name='e', base_url='https://example.com', variables={}, is_default=True
         )
-        case = DbTestCase.objects.create(project=project, title='c', status='active', steps=[])
+        case = DbTestCase.objects.create(
+            project=project,
+            title='c',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '/ping'}],
+        )
 
         factory = APIRequestFactory()
         req = factory.post(
@@ -1021,7 +1136,12 @@ class TestViewSetIntegration(DjangoTestCase):
         EnvConfig.objects.create(
             project=project, name='e', base_url='https://example.com', variables={}, is_default=True
         )
-        case = DbTestCase.objects.create(project=project, title='c', status='active', steps=[])
+        case = DbTestCase.objects.create(
+            project=project,
+            title='c',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '/ping'}],
+        )
 
         factory = APIRequestFactory()
         req = factory.post(
@@ -1032,6 +1152,33 @@ class TestViewSetIntegration(DjangoTestCase):
         force_authenticate(req, user=user)
         resp = api_views.TestCaseViewSet.as_view({'post': 'run_perf'})(req, pk=str(case.id))
         self.assertEqual(resp.status_code, 400)
+
+    def test_run_perf_rejects_ui_only_case(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('rp3', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        EnvConfig.objects.create(
+            project=project, name='e', base_url='https://example.com', variables={}, is_default=True
+        )
+        case = DbTestCase.objects.create(
+            project=project,
+            title='ui-only',
+            status='active',
+            steps=[{'type': 'ui', 'action': 'open', 'url': 'https://example.com'}],
+        )
+
+        factory = APIRequestFactory()
+        req = factory.post(
+            f'/api/cases/{case.id}/run_perf/',
+            {'users': 2, 'spawn_rate': 1, 'duration': '10s'},
+            format='json',
+        )
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'post': 'run_perf'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('HTTP', str(resp.data.get('detail', '')))
 
     def test_case_records_action(self):
         from django.contrib.auth import get_user_model
@@ -1048,6 +1195,66 @@ class TestViewSetIntegration(DjangoTestCase):
         resp = api_views.TestCaseViewSet.as_view({'get': 'records'})(req, pk=str(case.id))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.data), 1)
+
+    def test_case_quality_insight_action(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('qi1', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        case = DbTestCase.objects.create(
+            project=project,
+            title='quality',
+            status='active',
+            steps=[
+                {'type': 'http', 'method': 'GET', 'url': '/ping', 'assertions': [{'source': 'status_code', 'operator': 'eq', 'expected': '200'}], 'capture': {'x': {'from': 'json', 'path': 'a'}}},
+                {'type': 'ui', 'action': 'wait_visible', 'selector': '#x', 'by': 'css'},
+            ],
+            tags=['demo'],
+            variables={'k': 'v'},
+        )
+        case.records.create(status='success', result_log='', step_results=[], elapsed_time=1.2)
+        case.records.create(status='failed', result_log='', step_results=[], elapsed_time=2.2)
+
+        factory = APIRequestFactory()
+        req = factory.get(f'/api/cases/{case.id}/quality_insight/')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'get': 'quality_insight'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('overall_score', resp.data)
+        self.assertIn('dimensions', resp.data)
+        self.assertIn('suggestions', resp.data)
+        self.assertTrue(isinstance(resp.data.get('suggestions'), list))
+
+    def test_case_flaky_insight_action(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('fi1', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        case = DbTestCase.objects.create(
+            project=project,
+            title='flaky',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '/ping'}],
+        )
+        case.records.create(status='success', result_log='', step_results=[], elapsed_time=1.0)
+        case.records.create(status='failed', result_log='', step_results=[], elapsed_time=1.5)
+        case.records.create(status='success', result_log='', step_results=[], elapsed_time=1.3)
+        case.records.create(status='error', result_log='', step_results=[], elapsed_time=1.1)
+
+        factory = APIRequestFactory()
+        req = factory.get(f'/api/cases/{case.id}/flaky_insight/')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'get': 'flaky_insight'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('flaky_score', resp.data)
+        self.assertIn('risk_level', resp.data)
+        self.assertIn(resp.data.get('risk_level'), {'low', 'medium', 'high', 'unknown'})
+        self.assertTrue(0 <= int(resp.data.get('flaky_score', 0)) <= 100)
+        self.assertIn('suggested_attempts', resp.data)
+        self.assertIn('projections', resp.data)
+        self.assertTrue(isinstance(resp.data.get('projections'), list))
 
     def test_import_openapi_creates_cases(self):
         from django.contrib.auth import get_user_model

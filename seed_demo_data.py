@@ -49,6 +49,18 @@ def _case(title, tags, steps, *, variables=None, status="active"):
     }
 
 
+def _http(method, url, *, headers=None, body="", capture=None, assertions=None):
+    return {
+        "type": "http",
+        "method": method.upper(),
+        "url": url,
+        "headers": headers or {},
+        "body": body,
+        "capture": capture or {},
+        "assertions": assertions or [],
+    }
+
+
 def _login_steps(username="{{username}}", password="{{password}}"):
     return [
         _ui("open", url="{{base_url}}"),
@@ -141,6 +153,148 @@ def build_saucedemo_cases():
     ]
 
 
+def build_api_perf_cases():
+    return [
+        _case(
+            "[API] AP1-GET 查询参数回显",
+            ["API", "HTTP", "冒烟", "压测可用"],
+            [
+                _http(
+                    "GET",
+                    "/get?source=perf_demo&sku={{sku}}",
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "args.sku", "expected": "{{sku}}"},
+                    ],
+                )
+            ],
+            variables={"sku": "sku_1001"},
+        ),
+        _case(
+            "[API] AP2-POST JSON 回显校验",
+            ["API", "HTTP", "核心流程", "压测可用"],
+            [
+                _http(
+                    "POST",
+                    "/post",
+                    headers={"Content-Type": "application/json"},
+                    body={"order_id": "{{order_id}}", "amount": 199, "currency": "CNY"},
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "json.order_id", "expected": "{{order_id}}"},
+                        {"source": "json", "operator": "eq", "path": "json.amount", "expected": "199"},
+                    ],
+                )
+            ],
+            variables={"order_id": "ORDER_20260405_001"},
+        ),
+        _case(
+            "[API] AP3-变量提取并透传 Header",
+            ["API", "HTTP", "变量提取", "链路"],
+            [
+                _http(
+                    "GET",
+                    "/get?token={{token_seed}}",
+                    capture={"access_token": {"from": "json", "path": "args.token"}},
+                    assertions=[{"source": "status_code", "operator": "eq", "expected": "200"}],
+                ),
+                _http(
+                    "GET",
+                    "/get",
+                    headers={"x-access-token": "{{access_token}}"},
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "headers.x-access-token", "expected": "{{token_seed}}"},
+                    ],
+                ),
+            ],
+            variables={"token_seed": "DEMO_TOKEN_10086"},
+        ),
+        _case(
+            "[API] AP4-PUT 更新资源模拟",
+            ["API", "HTTP", "CRUD", "压测可用"],
+            [
+                _http(
+                    "PUT",
+                    "/put",
+                    headers={"Content-Type": "application/json"},
+                    body={"id": 101, "status": "paid"},
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "json.status", "expected": "paid"},
+                    ],
+                )
+            ],
+        ),
+        _case(
+            "[API] AP5-DELETE 删除资源模拟",
+            ["API", "HTTP", "CRUD", "压测可用"],
+            [
+                _http(
+                    "DELETE",
+                    "/delete",
+                    assertions=[{"source": "status_code", "operator": "eq", "expected": "200"}],
+                )
+            ],
+        ),
+        _case(
+            "[API] AP6-响应头断言",
+            ["API", "HTTP", "断言", "冒烟"],
+            [
+                _http(
+                    "GET",
+                    "/response-headers?x-demo=ok",
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "header", "operator": "eq", "path": "x-demo", "expected": "ok"},
+                    ],
+                )
+            ],
+        ),
+        _case(
+            "[API] AP7-压测基线 GET",
+            ["API", "HTTP", "压测", "基线"],
+            [
+                _http(
+                    "GET",
+                    "/get?load={{load_tag}}",
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "contains", "path": "args.load", "expected": "perf"},
+                    ],
+                )
+            ],
+            variables={"load_tag": "perf_baseline"},
+        ),
+        _case(
+            "[API] AP8-下单风格链路（创建-查询）",
+            ["API", "HTTP", "链路", "回归"],
+            [
+                _http(
+                    "POST",
+                    "/post",
+                    headers={"Content-Type": "application/json"},
+                    body={"order_no": "{{order_no}}", "items": 2, "amount": 399},
+                    capture={"created_order_no": {"from": "json", "path": "json.order_no"}},
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "json.order_no", "expected": "{{order_no}}"},
+                    ],
+                ),
+                _http(
+                    "GET",
+                    "/get?order_no={{created_order_no}}",
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "args.order_no", "expected": "{{order_no}}"},
+                    ],
+                ),
+            ],
+            variables={"order_no": "TRADE_20260405_9001"},
+        ),
+    ]
+
+
 def reset_primary_key_sequences():
     """
     在清空测试业务表后重置自增主键序列。
@@ -217,6 +371,7 @@ def reset_and_seed():
     ProjectMember.objects.create(project=project, user=viewer_user, is_active=True)
 
     cases = []
+    ui_cases = []
     for item in build_saucedemo_cases():
         case = TestCase.objects.create(
             project=project,
@@ -243,6 +398,7 @@ def reset_and_seed():
             created_by=demo_user,
         )
         cases.append(case)
+        ui_cases.append(case)
         print(f"  + 用例: {case.title}")
 
     smoke_ids = [c.id for c in cases if c.title.startswith("[UI] SD1") or c.title.startswith("[UI] SD3")]
@@ -279,6 +435,85 @@ def reset_and_seed():
         ordered_case_ids=regression_ids,
     )
 
+    api_project = Project.objects.create(
+        owner=demo_user,
+        name="Demo-HTTP-API-Perf",
+        description="用于接口自动化与压测演示的 HTTP 用例集，包含断言、变量提取和链路流程。",
+    )
+    api_env = EnvConfig.objects.create(
+        project=api_project,
+        name="Postman Echo 公网环境",
+        base_url="https://postman-echo.com",
+        variables={"base_url": "https://postman-echo.com"},
+        db_config={},
+        is_default=True,
+    )
+    ProjectMember.objects.create(project=api_project, user=viewer_user, is_active=True)
+
+    api_cases = []
+    for item in build_api_perf_cases():
+        case = TestCase.objects.create(
+            project=api_project,
+            title=item["title"],
+            tags=item["tags"],
+            status=item["status"],
+            variables=item["variables"],
+            steps=item["steps"],
+        )
+        TestCaseVersion.objects.create(
+            case=case,
+            version=1,
+            snapshot={
+                "project": case.project_id,
+                "title": case.title,
+                "steps": case.steps,
+                "variables": case.variables,
+                "tags": case.tags,
+                "setup_sql": case.setup_sql,
+                "teardown_sql": case.teardown_sql,
+                "status": case.status,
+                "updated_at": str(case.updated_at),
+            },
+            created_by=demo_user,
+        )
+        cases.append(case)
+        api_cases.append(case)
+        print(f"  + 用例: {case.title}")
+
+    api_smoke_ids = [c.id for c in api_cases if c.title.startswith("[API] AP1") or c.title.startswith("[API] AP2")]
+    api_chain_ids = [c.id for c in api_cases if c.title.startswith("[API] AP3") or c.title.startswith("[API] AP8")]
+    api_perf_ids = [c.id for c in api_cases if c.title.startswith("[API] AP1") or c.title.startswith("[API] AP7")]
+    api_regression_ids = [c.id for c in api_cases]
+
+    TestSuite.objects.create(
+        project=api_project,
+        name="HTTP-API-冒烟套件",
+        description="GET/POST 接口可用性与核心断言。",
+        variables={},
+        ordered_case_ids=api_smoke_ids,
+    )
+    TestSuite.objects.create(
+        project=api_project,
+        name="HTTP-API-链路套件",
+        description="变量提取与创建-查询业务链路。",
+        variables={},
+        ordered_case_ids=api_chain_ids,
+    )
+    TestSuite.objects.create(
+        project=api_project,
+        name="HTTP-API-压测套件",
+        description="压测前基线接口：可直接用于 Locust 压测入口。",
+        variables={},
+        ordered_case_ids=api_perf_ids,
+    )
+    TestSuite.objects.create(
+        project=api_project,
+        name="HTTP-API-回归套件",
+        description="覆盖 GET/POST/PUT/DELETE、变量提取、响应头断言。",
+        variables={},
+        ordered_case_ids=api_regression_ids,
+    )
+
     perf_dir = os.path.join(BACKEND_DIR, "media", "perf")
     if os.path.isdir(perf_dir):
         shutil.rmtree(perf_dir, ignore_errors=True)
@@ -287,10 +522,12 @@ def reset_and_seed():
     print("\n重建完成：")
     print(f"- 管理员账号：{demo_username} / {demo_password}")
     print(f"- 普通用户账号：{viewer_username} / {viewer_password}")
-    print(f"- 项目：{project.name}")
-    print(f"- 环境：{env.name} ({env.base_url})")
-    print(f"- 用例数：{len(cases)}（全部为 SauceDemo UI 流程）")
-    print("- 套件数：4（冒烟/交易链路/异常/回归）")
+    print(f"- 项目1：{project.name}")
+    print(f"- 环境1：{env.name} ({env.base_url})")
+    print(f"- 项目2：{api_project.name}")
+    print(f"- 环境2：{api_env.name} ({api_env.base_url})")
+    print(f"- 用例总数：{len(cases)}（UI: {len(ui_cases)}，HTTP: {len(api_cases)}）")
+    print("- 套件总数：8（UI 4 + HTTP 4）")
 
 
 if __name__ == "__main__":

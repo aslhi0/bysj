@@ -160,20 +160,33 @@ def _execute_case_once(case, *, variables, db_config):
 # ---------------------------------------------------------------------------
 
 @shared_task
-def run_test_case_task(case_id, env_id=None, extra_vars=None):
+def run_test_case_task(case_id, env_id=None, extra_vars=None, retry_times=0):
     case = None
     record = None
     error_message = None
+    attempts = 1
+    retries_used = 0
 
     try:
+        try:
+            retry_times = int(retry_times or 0)
+        except Exception:
+            retry_times = 0
+        retry_times = max(0, min(retry_times, 3))
+        attempts = retry_times + 1
+
         case = TestCase.objects.get(id=case_id)
         env_vars, db_config = _resolve_env(case.project, env_id)
         merged_vars = {**env_vars, **(case.variables or {}), **(extra_vars or {})}
-        record, _engine, error_message = _execute_case_once(
-            case,
-            variables=merged_vars,
-            db_config=db_config,
-        )
+        for idx in range(attempts):
+            record, _engine, error_message = _execute_case_once(
+                case,
+                variables=merged_vars,
+                db_config=db_config,
+            )
+            retries_used = idx
+            if record is not None and record.status == 'success':
+                break
     except Exception as e:
         error_message = str(e)
         logger.exception('run_test_case_task failed case_id=%s', case_id)
@@ -198,6 +211,8 @@ def run_test_case_task(case_id, env_id=None, extra_vars=None):
         'record_id': record.id,
         'elapsed_time': f'{record.elapsed_time:.2f}',
         'message': error_message,
+        'attempts': attempts,
+        'retries_used': retries_used,
     }
 
 

@@ -9,11 +9,14 @@ __pycache__/
 
 .coverage
 .coverage.*
+backend/.coverage
 coverage.xml
 htmlcov/
 cov.json
 **/cov*.json
 pytest-results.xml
+backend/pytest-results.xml
+backend/perf_*.csv
 
 .env
 .env.*
