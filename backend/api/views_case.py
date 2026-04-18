@@ -103,6 +103,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 "suggested_attempts": 1,
                 "projections": [],
                 "message": "暂无执行样本，请先运行该用例后再分析。",
+                "warning": "样本量不足，分析结果不可靠",
                 "meta": {
                     "target_success": float(target_success),
                     "max_attempts": int(max_attempts),
@@ -116,6 +117,17 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         n = len(seq)
         fail_count = sum(seq)
         failure_rate = fail_count / n if n else 0.0
+
+        # 样本量不足时的警告
+        if n < 5:
+            warning = f"当前样本量仅 {n} 次，建议至少运行 5 次后再依据分析结果制定策略。"
+            confidence_level = "low"
+        elif n < 10:
+            warning = f"当前样本量为 {n} 次，建议增加至 10 次以上以提高分析可信度。"
+            confidence_level = "medium"
+        else:
+            warning = None
+            confidence_level = "high"
 
         alpha = 0.35
         ewma = seq[0] if seq else 0.0
@@ -176,7 +188,14 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 suggested_attempts = attempts
 
         suggested_retries = max(0, suggested_attempts - 1)
-        return {
+
+        # 构建分析消息
+        if n >= 10:
+            message = "分值越高表示该用例近期越不稳定；建议按预测成功率动态设置重试次数。"
+        else:
+            message = f"当前样本量为 {n} 次，分析结果可信度有限。建议增加执行次数后再依据分析结果制定策略。"
+
+        result = {
             "sample_size": n,
             "flaky_score": flaky_score,
             "risk_level": risk_level,
@@ -187,12 +206,18 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             "suggested_retries": suggested_retries,
             "suggested_attempts": suggested_attempts,
             "projections": projections,
-            "message": "分值越高表示该用例近期越不稳定；建议按预测成功率动态设置重试次数。",
+            "message": message,
+            "confidence_level": confidence_level,
             "meta": {
                 "target_success": float(target_success),
                 "max_attempts": int(max_attempts),
             },
         }
+
+        if warning:
+            result["warning"] = warning
+
+        return result
 
     def perform_create(self, serializer):
         self._ensure_admin()
@@ -269,7 +294,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def run_smart(self, request, pk=None):
-        """Use flaky analysis to choose retry strategy then enqueue."""
+        """自适应执行策略：按 Flaky 分析给出的建议重试次数入队执行。"""
         case = self.get_object()
         extra_vars = request.data.get("variables", {})
         env_id = self._resolve_env_id(case, request.data.get("env_id"))
@@ -300,7 +325,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             {
                 "status": "pending",
                 "task_id": task.id,
-                "message": "智能重试任务已进入队列",
+                "message": "自适应执行任务已进入队列",
                 "retry_times": retry_times,
                 "max_attempts": retry_times + 1,
                 "strategy": strategy,
@@ -520,7 +545,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def flaky_insight(self, request, pk=None):
-        """Flaky risk analysis via Wilson interval + EWMA trend."""
+        """Flaky 分析：Wilson 上界、状态切换率与 EWMA 趋势融合为风险分与重试建议。"""
         case = self.get_object()
         try:
             target_success = float(request.query_params.get("target_success", 0.95))
@@ -546,34 +571,44 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             }
         )
 
-    @action(detail=False, methods=["post"], url_path="import-openapi")
-    def import_openapi(self, request):
-        self._ensure_admin()
-        max_spec_chars = 1_500_000
-        max_paths = 500
-        max_cases_created = 1000
+    def _validate_openapi_params(self, request, max_spec_chars):
+        """验证 OpenAPI 导入参数"""
         project_id = request.data.get("project")
         spec = request.data.get("spec")
         spec_url = request.data.get("spec_url")
         spec_yaml = request.data.get("spec_yaml")
         on_conflict = str(request.data.get("on_conflict", "skip")).strip().lower() or "skip"
+
         if not project_id:
-            return Response({"detail": "缺少项目 ID"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "缺少项目 ID"}, status=status.HTTP_400_BAD_REQUEST)
         if spec is None and not spec_url and not spec_yaml:
-            return Response({"detail": "缺少 spec / spec_url / spec_yaml"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "缺少 spec / spec_url / spec_yaml"}, status=status.HTTP_400_BAD_REQUEST)
+
         project = Project.objects.filter(id=project_id, owner=request.user).first()
         if project is None:
-            return Response({"detail": "项目不存在或无权限"}, status=status.HTTP_404_NOT_FOUND)
+            return None, Response({"detail": "项目不存在或无权限"}, status=status.HTTP_404_NOT_FOUND)
+
         if spec_url is not None and not isinstance(spec_url, str):
-            return Response({"detail": "spec_url 必须是字符串"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "spec_url 必须是字符串"}, status=status.HTTP_400_BAD_REQUEST)
         if spec_yaml is not None and not isinstance(spec_yaml, str):
-            return Response({"detail": "spec_yaml 必须是字符串"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "spec_yaml 必须是字符串"}, status=status.HTTP_400_BAD_REQUEST)
         if isinstance(spec_url, str) and len(spec_url) > 2000:
-            return Response({"detail": "spec_url 过长"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "spec_url 过长"}, status=status.HTTP_400_BAD_REQUEST)
         if isinstance(spec_yaml, str) and len(spec_yaml) > max_spec_chars:
-            return Response({"detail": "spec_yaml 体积过大"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "spec_yaml 体积过大"}, status=status.HTTP_400_BAD_REQUEST)
         if on_conflict not in {"skip", "overwrite"}:
-            return Response({"detail": "on_conflict 仅支持 skip / overwrite"}, status=status.HTTP_400_BAD_REQUEST)
+            return None, Response({"detail": "on_conflict 仅支持 skip / overwrite"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return {
+            "project": project,
+            "spec": spec,
+            "spec_url": spec_url,
+            "spec_yaml": spec_yaml,
+            "on_conflict": on_conflict,
+        }, None
+
+    def _fetch_openapi_spec(self, spec, spec_url, spec_yaml, project, max_spec_chars):
+        """获取并解析 OpenAPI 规范"""
         if spec is None:
             if spec_url:
                 allow_hosts = []
@@ -587,7 +622,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     if h:
                         allow_hosts.append(h)
                 if not allow_hosts:
-                    return Response(
+                    return None, Response(
                         {"detail": "项目未配置可用环境 base_url，无法通过 spec_url 导入"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
@@ -597,33 +632,32 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     resp.raise_for_status()
                     body = resp.text or ""
                     if len(body) > max_spec_chars:
-                        return Response({"detail": "远程 spec 体积过大"}, status=status.HTTP_400_BAD_REQUEST)
+                        return None, Response({"detail": "远程 spec 体积过大"}, status=status.HTTP_400_BAD_REQUEST)
                     content_type = str(resp.headers.get("Content-Type", "")).lower()
                     spec = yaml.safe_load(body) if "yaml" in content_type or body.lstrip().startswith(("openapi:", "swagger:")) else resp.json()
                 except Exception as e:
-                    return Response({"detail": f"拉取或解析 spec_url 失败: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+                    return None, Response({"detail": f"拉取或解析 spec_url 失败: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
             elif spec_yaml:
                 try:
                     spec = yaml.safe_load(spec_yaml)
                 except Exception as e:
-                    return Response({"detail": f"解析 spec_yaml 失败: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+                    return None, Response({"detail": f"解析 spec_yaml 失败: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
         if isinstance(spec, str):
             if len(spec) > max_spec_chars:
-                return Response({"detail": "spec 体积过大"}, status=status.HTTP_400_BAD_REQUEST)
+                return None, Response({"detail": "spec 体积过大"}, status=status.HTTP_400_BAD_REQUEST)
             try:
                 spec = json.loads(spec)
             except Exception as e:
-                return Response({"detail": f"spec 不是合法 JSON: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
-        if not isinstance(spec, dict):
-            return Response({"detail": "spec 必须是 JSON 对象"}, status=status.HTTP_400_BAD_REQUEST)
-        paths = spec.get("paths", {})
-        if not isinstance(paths, dict):
-            return Response({"detail": "spec.paths 必须是对象"}, status=status.HTTP_400_BAD_REQUEST)
-        if len(paths) > max_paths:
-            return Response({"detail": f"paths 数量过多，最多允许 {max_paths} 条"}, status=status.HTTP_400_BAD_REQUEST)
-        count = 0
-        allowed_methods = {"get", "post", "put", "delete", "patch", "head", "options"}
+                return None, Response({"detail": f"spec 不是合法 JSON: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
+        if not isinstance(spec, dict):
+            return None, Response({"detail": "spec 必须是 JSON 对象"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return spec, None
+
+    def _build_schema_helpers(self, spec):
+        """构建 OpenAPI schema 解析辅助函数"""
         def _resolve_ref(ref):
             if not isinstance(ref, str) or not ref.startswith("#/"):
                 return {}
@@ -708,6 +742,112 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 return ""
             return {}
 
+        return _from_schema
+
+    def _create_test_case_from_openapi(self, path, method, info, project, on_conflict, _from_schema):
+        """从 OpenAPI 路径创建测试用例"""
+        title = f"{method.upper()} {path} - {str(info.get('summary', 'OpenAPI Import'))[:120]}"
+        existing = TestCase.objects.filter(project=project, title=title).first()
+        if existing and on_conflict == "skip":
+            return False
+
+        params = info.get("parameters", [])
+        query_params = {}
+        header_map = {}
+        if isinstance(params, list):
+            for p in params:
+                if not isinstance(p, dict):
+                    continue
+                p_name = p.get("name")
+                p_in = str(p.get("in", "")).lower()
+                if not p_name:
+                    continue
+                if p_in == "query":
+                    query_params[p_name] = f"{{{{{p_name}}}}}"
+                elif p_in == "header":
+                    header_map[p_name] = f"{{{{{p_name}}}}}"
+
+        final_path = path
+        if query_params:
+            final_path = f"{path}?{'&'.join([f'{k}={v}' for k, v in query_params.items()])}"
+
+        req_body = info.get("requestBody", {})
+        body = ""
+        if isinstance(req_body, dict):
+            content = req_body.get("content", {})
+            if isinstance(content, dict):
+                json_content = content.get("application/json") or {}
+                if isinstance(json_content, dict):
+                    if "example" in json_content:
+                        body = json_content.get("example")
+                    else:
+                        examples = json_content.get("examples", {})
+                        if isinstance(examples, dict) and examples:
+                            first = next(iter(examples.values()))
+                            if isinstance(first, dict) and "value" in first:
+                                body = first.get("value")
+                    if body == "":
+                        schema_obj = json_content.get("schema", {})
+                        body = _from_schema(schema_obj)
+                    if isinstance(body, (dict, list)):
+                        header_map.setdefault("Content-Type", "application/json")
+
+        new_steps = [{
+            "type": "http",
+            "method": method.upper(),
+            "url": f"{{{{base_url}}}}{final_path}",
+            "headers": header_map,
+            "body": body,
+            "capture": {},
+        }]
+
+        if existing and on_conflict == "overwrite":
+            existing.steps = new_steps
+            existing.status = "draft"
+            existing.save(update_fields=["steps", "status", "updated_at"])
+        else:
+            TestCase.objects.create(
+                project=project,
+                title=title,
+                steps=new_steps,
+                status="draft",
+            )
+        return True
+
+    @action(detail=False, methods=["post"], url_path="import-openapi")
+    def import_openapi(self, request):
+        self._ensure_admin()
+        max_spec_chars = 1_500_000
+        max_paths = 500
+        max_cases_created = 1000
+
+        # 验证参数
+        params, error_response = self._validate_openapi_params(request, max_spec_chars)
+        if error_response:
+            return error_response
+
+        # 获取并解析 spec
+        spec, error_response = self._fetch_openapi_spec(
+            params["spec"], params["spec_url"], params["spec_yaml"],
+            params["project"], max_spec_chars
+        )
+        if error_response:
+            return error_response
+
+        # 验证 paths
+        paths = spec.get("paths", {})
+        if not isinstance(paths, dict):
+            return Response({"detail": "spec.paths 必须是对象"}, status=status.HTTP_400_BAD_REQUEST)
+        if len(paths) > max_paths:
+            return Response({"detail": f"paths 数量过多，最多允许 {max_paths} 条"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 构建 schema 解析器
+        _from_schema = self._build_schema_helpers(spec)
+
+        # 遍历并创建用例
+        count = 0
+        allowed_methods = {"get", "post", "put", "delete", "patch", "head", "options"}
+
         for path, methods in paths.items():
             if not isinstance(path, str) or not path.startswith("/") or len(path) > 500 or not isinstance(methods, dict):
                 continue
@@ -716,72 +856,14 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                     continue
                 if not isinstance(info, dict):
                     info = {}
-                title = f"{method.upper()} {path} - {str(info.get('summary', 'OpenAPI Import'))[:120]}"
-                existing = TestCase.objects.filter(project=project, title=title).first()
-                if existing and on_conflict == "skip":
-                    continue
 
-                params = info.get("parameters", [])
-                query_params = {}
-                header_map = {}
-                if isinstance(params, list):
-                    for p in params:
-                        if not isinstance(p, dict):
-                            continue
-                        p_name = p.get("name")
-                        p_in = str(p.get("in", "")).lower()
-                        if not p_name:
-                            continue
-                        if p_in == "query":
-                            query_params[p_name] = f"{{{{{p_name}}}}}"
-                        elif p_in == "header":
-                            header_map[p_name] = f"{{{{{p_name}}}}}"
+                created = self._create_test_case_from_openapi(
+                    path, method, info, params["project"],
+                    params["on_conflict"], _from_schema
+                )
+                if created:
+                    count += 1
+                    if count >= max_cases_created:
+                        return Response({"count": count, "truncated": True})
 
-                final_path = path
-                if query_params:
-                    final_path = f"{path}?{'&'.join([f'{k}={v}' for k, v in query_params.items()])}"
-
-                req_body = info.get("requestBody", {})
-                body = ""
-                if isinstance(req_body, dict):
-                    content = req_body.get("content", {})
-                    if isinstance(content, dict):
-                        json_content = content.get("application/json") or {}
-                        if isinstance(json_content, dict):
-                            if "example" in json_content:
-                                body = json_content.get("example")
-                            else:
-                                examples = json_content.get("examples", {})
-                                if isinstance(examples, dict) and examples:
-                                    first = next(iter(examples.values()))
-                                    if isinstance(first, dict) and "value" in first:
-                                        body = first.get("value")
-                            if body == "":
-                                schema_obj = json_content.get("schema", {})
-                                body = _from_schema(schema_obj)
-                            if isinstance(body, (dict, list)):
-                                header_map.setdefault("Content-Type", "application/json")
-
-                new_steps = [{
-                    "type": "http",
-                    "method": method.upper(),
-                    "url": f"{{{{base_url}}}}{final_path}",
-                    "headers": header_map,
-                    "body": body,
-                    "capture": {},
-                }]
-                if existing and on_conflict == "overwrite":
-                    existing.steps = new_steps
-                    existing.status = "draft"
-                    existing.save(update_fields=["steps", "status", "updated_at"])
-                else:
-                    TestCase.objects.create(
-                        project=project,
-                        title=title,
-                        steps=new_steps,
-                        status="draft",
-                    )
-                count += 1
-                if count >= max_cases_created:
-                    return Response({"count": count, "truncated": True})
         return Response({"count": count})
