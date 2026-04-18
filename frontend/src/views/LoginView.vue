@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { apiFetch, setTokens } from '../api'
 import { loadCurrentUser, resetCurrentUserCache } from '../auth'
+import { INNOVATION_TAGLINE, PLATFORM_NAME } from '../branding'
 
 const router = useRouter()
 const mode = ref('login')
@@ -65,9 +66,9 @@ async function submit() {
     <div class="bg-glow bg-glow-left" />
     <div class="bg-glow bg-glow-right" />
     <el-card class="card" shadow="never">
-      <div class="brand">AutoTest Platform</div>
+      <div class="brand">{{ PLATFORM_NAME }}</div>
       <div class="title">欢迎回来</div>
-      <div class="subtitle">自动化测试平台 · 稳定、清晰、高效</div>
+      <div class="subtitle">{{ INNOVATION_TAGLINE }}</div>
 
       <el-radio-group v-model="mode" class="mode-switch">
         <el-radio-button value="login">登录</el-radio-button>

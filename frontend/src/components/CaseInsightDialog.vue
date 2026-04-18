@@ -123,7 +123,7 @@ function flakyRiskText(level) {
             :color="props.data.flaky_score >= 70 ? '#f56c6c' : props.data.flaky_score >= 45 ? '#e6a23c' : '#67c23a'"
           />
           <div class="insight-score-meta">
-            <div class="insight-score-title">波动风险分：{{ props.data.flaky_score }}</div>
+            <div class="insight-score-title">Flaky 风险分：{{ props.data.flaky_score }}</div>
             <el-tag :type="flakyRiskTag(props.data.risk_level)" size="large">
               {{ flakyRiskText(props.data.risk_level) }}
             </el-tag>
@@ -131,7 +131,7 @@ function flakyRiskText(level) {
           </div>
         </div>
 
-        <el-divider content-position="left">算法指标</el-divider>
+        <el-divider content-position="left">Flaky 分析指标</el-divider>
         <div class="insight-metrics">
           <el-tag>样本数: {{ props.data.sample_size }}</el-tag>
           <el-tag type="danger">失败率: {{ (props.data.failure_rate * 100).toFixed(1) }}%</el-tag>
@@ -154,11 +154,11 @@ function flakyRiskText(level) {
         </div>
 
         <el-alert type="success" :closable="false" style="margin-top: 14px">
-          该算法结合统计置信区间（Wilson）与指数滑动平均（EWMA），用于识别“偶发失败但不稳定”的 Flaky 用例。
+          Flaky 分析融合 Wilson 上界、状态切换率与 EWMA；建议重试与「自适应执行」按钮共用同一套决策结果。
         </el-alert>
       </template>
 
-      <el-empty v-else-if="!props.loading" :description="props.mode === 'quality' ? '暂无评分数据' : '暂无波动分析数据'" />
+      <el-empty v-else-if="!props.loading" :description="props.mode === 'quality' ? '暂无评分数据' : '暂无 Flaky 分析数据'" />
     </div>
     <template #footer>
       <el-button type="primary" @click="closeDialog">关闭</el-button>

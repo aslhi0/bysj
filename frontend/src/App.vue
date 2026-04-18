@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { HomeFilled, Files, List, Collection, Operation as Odometer, Monitor, DataLine, Document } from '@element-plus/icons-vue'
 import { clearTokens, getAccessToken } from './api'
 import { useCurrentUser } from './auth'
+import { INNOVATION_TAGLINE, PLATFORM_NAME } from './branding'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,7 +58,10 @@ function logout() {
     <el-aside width="220px" class="aside">
       <div class="logo-container">
         <el-icon :size="24" color="#409eff"><Odometer /></el-icon>
-        <span class="logo-text">AutoTest Platform</span>
+        <div class="logo-brand">
+          <span class="logo-text">{{ PLATFORM_NAME }}</span>
+          <span class="logo-tagline">{{ INNOVATION_TAGLINE }}</span>
+        </div>
       </div>
       
       <el-menu
@@ -126,19 +130,36 @@ function logout() {
 }
 
 .logo-container {
-  height: 60px;
+  min-height: 60px;
+  padding: 10px 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 8px;
   background-color: #002140;
+}
+
+.logo-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .logo-text {
   color: white;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
+  line-height: 1.25;
+}
+
+.logo-tagline {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  line-height: 1.3;
+  font-weight: 400;
+  letter-spacing: 0.02em;
 }
 
 .menu {
@@ -214,7 +235,11 @@ function logout() {
   }
 
   .logo-text {
-    font-size: 15px;
+    font-size: 13px;
+  }
+
+  .logo-tagline {
+    font-size: 9px;
   }
 
   .header {

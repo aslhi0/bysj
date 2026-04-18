@@ -579,7 +579,7 @@ async function openFlakyDialog(row) {
     const res = await apiFetch(`/api/cases/${row.id}/flaky_insight/`)
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      ElMessage.error(data.detail || '波动分析失败')
+      ElMessage.error(data.detail || 'Flaky 分析失败')
       return
     }
     flakyData.value = data
@@ -603,14 +603,14 @@ async function runCaseSmartRetry(row) {
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      ElMessage.error(data.detail || '智能重试执行失败')
+      ElMessage.error(data.detail || '自适应执行失败')
       runLoading.value = false
       return
     }
     const retryTimes = Number(data.retry_times || 0)
     const attempts = Number(data.max_attempts || (retryTimes + 1))
-    ElMessage.info(`智能策略已应用：最多执行 ${attempts} 次（重试 ${retryTimes} 次）`)
-    pollTaskStatus(data.task_id, `${row.title}（智能重试）`)
+    ElMessage.info(`自适应执行策略：最多执行 ${attempts} 次（重试 ${retryTimes} 次）`)
+    pollTaskStatus(data.task_id, `${row.title}（自适应执行）`)
   } catch (e) {
     ElMessage.error(String(e))
     runLoading.value = false
@@ -759,10 +759,10 @@ async function pollTaskStatus(taskId, title) {
           <el-table-column :width="isAdminUser ? 610 : 470" label="操作" fixed="right">
             <template #default="{ row }">
               <el-button type="primary" link :disabled="runLoading" @click="runCase(row)">立即执行</el-button>
-              <el-button type="success" link :disabled="runLoading" @click="runCaseSmartRetry(row)">智能重试执行</el-button>
+              <el-button type="success" link :disabled="runLoading" @click="runCaseSmartRetry(row)">自适应执行</el-button>
               <el-button type="success" link :disabled="runLoading || !canRunPerf(row)" @click="openPerfDialog(row)">压测</el-button>
               <el-button type="info" link :disabled="runLoading" @click="openQualityDialog(row)">质量评分</el-button>
-              <el-button type="warning" link :disabled="runLoading" @click="openFlakyDialog(row)">波动分析</el-button>
+              <el-button type="warning" link :disabled="runLoading" @click="openFlakyDialog(row)">Flaky 分析</el-button>
               <el-button v-if="isAdminUser" type="primary" link :disabled="runLoading" @click="openEdit(row)">编辑</el-button>
               <el-button type="info" link :disabled="runLoading" @click="openCaseHistory(row)">执行历史</el-button>
               <el-button type="warning" link :disabled="runLoading" @click="openCaseVersions(row)">版本</el-button>
@@ -774,7 +774,7 @@ async function pollTaskStatus(taskId, title) {
     <CaseInsightDialog
       v-model:visible="flakyDialogVisible"
       :loading="flakyLoading"
-      :title="`波动分析器 — ${flakyTitle}`"
+      :title="`Flaky 分析 — ${flakyTitle}`"
       mode="flaky"
       :data="flakyData"
     />

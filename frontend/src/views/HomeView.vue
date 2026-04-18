@@ -178,7 +178,10 @@ onMounted(async () => {
             <el-step title="创建测试项目" description="在「测试项目」模块中定义你的业务系统或项目边界。" />
             <el-step title="编写测试用例" description="支持 HTTP 接口与 UI 自动化混跑，支持 OpenAPI 导入。" />
             <el-step title="组织测试套件" description="将用例按业务流程编排，支持变量传递与批量执行。" />
-            <el-step title="查看报告与分析" description="自动记录执行历史，提供详细的步骤日志与错误截图（即将支持）。" />
+            <el-step
+              title="Flaky 分析与自适应执行"
+              description="用例列表中可查看 Flaky 分析；对不稳定用例使用「自适应执行」，由分析结果自动决定重试次数。"
+            />
           </el-steps>
         </el-card>
       </el-col>

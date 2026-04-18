@@ -1,6 +1,8 @@
-﻿# AutoTest Platform
+﻿# 自动化测试平台（毕设工程）
 
-面向毕业设计与课程实践的自动化测试平台，基于 `Django + Vue 3`，统一支持 UI、HTTP、性能测试，并提供可解释分析与智能执行策略。
+**论文题目：** 基于 Flaky 分析与自适应执行策略的自动化测试平台设计与实现。
+
+工程基于 `Django + Vue 3`，在统一 Web 平台中整合 UI / HTTP / 性能测试；创新点集中在 **Flaky 分析**（`flaky_insight`：Wilson、切换率、EWMA）与 **自适应执行策略**（`run_smart`：按分析结果定重试并入队），形成「分析—决策—执行」闭环。
 
 ## 1. 项目定位
 
@@ -33,11 +35,11 @@
 - CSV 报告解析 + 前端图表展示
 - 防重复提交与压测记录删除（同步清理产物）
 
-### 2.4 智能分析与策略执行
+### 2.4 Flaky 分析与自适应执行（创新点）
 
 - 质量评分卡（设计完整性/执行稳定性/可运维性）
-- Flaky 分析（Wilson 置信区间 + EWMA 趋势 + 状态切换率）
-- 智能重试执行 `run_smart`：算法先决策，再自动入队执行
+- **Flaky 分析**（`flaky_insight`）：Wilson 上界、状态切换率、EWMA 融合为风险分与重试建议
+- **自适应执行策略**（`run_smart`）：按上述分析自动确定重试次数并入队执行
 
 ## 3. 技术栈
 
@@ -117,7 +119,7 @@ d:\test\venv\Scripts\python.exe seed_demo_data.py
 ### 7.2 用例执行与分析
 
 - `POST /api/cases/{id}/run/`（支持 `retry_times`）
-- `POST /api/cases/{id}/run_smart/`（智能重试策略执行）
+- `POST /api/cases/{id}/run_smart/`（自适应执行策略，依赖 Flaky 分析结果）
 - `GET /api/cases/{id}/quality_insight/`
 - `GET /api/cases/{id}/flaky_insight/`
 
@@ -156,7 +158,7 @@ npm run build
 建议围绕三个证据链展开：
 
 1. **功能正确性**：UI/HTTP/套件/压测主流程可复现
-2. **策略有效性**：普通执行 vs 智能重试执行对比（成功率/耗时）
+2. **策略有效性**：普通执行 vs 自适应执行（`run_smart`）对比（成功率/耗时）
 3. **稳定性与安全性**：Flaky 风险评估与安全防护验证
 
 推荐实验指标：
