@@ -576,7 +576,7 @@ async function openFlakyDialog(row) {
   flakyTitle.value = row.title
   flakyData.value = null
   try {
-    const res = await apiFetch(`/api/cases/${row.id}/flaky_insight/`)
+    const res = await apiFetch(`/api/cases/${row.id}/experiment_summary/`)
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
       ElMessage.error(data.detail || 'Flaky 分析失败')

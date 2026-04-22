@@ -85,19 +85,34 @@ class TestSuiteViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def run(self, request, pk=None):
+        from rest_framework import status as http_status
+
         suite = self.get_object()
         extra_vars = request.data.get("variables", {})
         env_id = request.data.get("env_id")
         stop_on_failure = request.data.get("stop_on_failure", False)
+        retry_times = request.data.get("retry_times", 0)
+        try:
+            retry_times = int(retry_times)
+        except Exception:
+            retry_times = 0
+        if retry_times < 0 or retry_times > 3:
+            return Response({"detail": "retry_times 超出范围（0-3）"}, status=http_status.HTTP_400_BAD_REQUEST)
         if env_id:
             env_id = EnvConfig.objects.filter(project=suite.project, id=env_id).values_list("id", flat=True).first()
         if not env_id:
             env = EnvConfig.objects.filter(project=suite.project, is_default=True).order_by("-created_at").first()
             if env is not None:
                 env_id = env.id
-        task = run_test_suite_task.delay(suite.id, env_id, extra_vars, stop_on_failure)
+        task = run_test_suite_task.delay(suite.id, env_id, extra_vars, stop_on_failure, retry_times)
         bind_task_owner(task.id, request.user.id)
-        return Response({"status": "pending", "task_id": task.id, "message": "测试套件任务已进入队列"})
+        return Response({
+            "status": "pending",
+            "task_id": task.id,
+            "message": "测试套件任务已进入队列",
+            "retry_times": retry_times,
+            "max_attempts_per_case": retry_times + 1,
+        })
 
     @action(detail=True, methods=["get"])
     def export_locust(self, request, pk=None):

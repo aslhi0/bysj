@@ -1,20 +1,24 @@
+# 顶层依赖：已加主版本号上限，避免 CI 拉到 breaking change 的新主版本导致启动失败。
+# 精确可复现的版本锁定请使用 `pip-compile requirements.txt -o requirements.lock`
+# 或 `pip freeze > requirements.lock`，提交后由 CI 用 `pip install -r requirements.lock` 部署。
 Django>=4.2,<5
-djangorestframework>=3.14
-djangorestframework-simplejwt>=5.3
-django-cors-headers>=4.3
-requests>=2.28
-PyYAML>=6.0.1
-selenium>=4.15
-pytest>=7.4
-pytest-django>=4.8
-pytest-cov>=5.0
-celery>=5.3
-redis>=5.0
-django-celery-beat>=2.5
-locust>=2.17
-jsonschema>=4.17
-flower>=2.0
-Pillow>=10.0
-faker>=19.0
-psycopg[binary]>=3.1
-cryptography>=42.0
+djangorestframework>=3.14,<4
+djangorestframework-simplejwt>=5.3,<6
+django-cors-headers>=4.3,<5
+requests>=2.28,<3
+PyYAML>=6.0.1,<7
+selenium>=4.15,<5
+pytest>=7.4,<9
+pytest-django>=4.8,<5
+pytest-cov>=5.0,<7
+celery>=5.3,<6
+redis>=5.0,<6
+django-celery-beat>=2.5,<3
+locust>=2.17,<3
+jsonschema>=4.17,<5
+flower>=2.0,<3
+Pillow>=10.0,<12
+faker>=19.0,<38
+psycopg[binary]>=3.1,<4
+cryptography>=42.0,<46
+drf-spectacular>=0.27,<1

@@ -2,6 +2,7 @@ from unittest import TestCase
 from unittest.mock import patch, MagicMock
 import json
 import os
+import socket
 
 from django.test import TestCase as DjangoTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -15,6 +16,7 @@ from .locust_codegen import generate_locust_code
 from .utils import Notifier
 from .crypto_utils import decrypt_json, encrypt_str, decrypt_str, merge_masked, ENC_PREFIX, MASK
 from .task_tracker import bind_task_owner, get_task_owner
+from .flaky_analysis import compute_flaky_analysis_from_statuses
 
 class FakeResponse:
     def __init__(self, status_code=200, json_data=None, headers=None):
@@ -55,7 +57,11 @@ class TestEngineHttp(TestCase):
             'assertions': [],
         }
         resp = FakeResponse(status_code=200, json_data={'data': {'token': 'abc'}})
-        with patch('api.engine.requests.request', return_value=resp) as _p:
+        gai = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', ('93.184.216.34', 443))]
+        with (
+            patch('api.engine.requests.request', return_value=resp),
+            patch('api.engine.socket.getaddrinfo', return_value=gai),
+        ):
             ok = engine.run_http(step)
         self.assertTrue(ok)
         self.assertEqual(engine.variables.get('token'), 'abc')
@@ -172,8 +178,9 @@ class TestIntegrationTasks(DjangoTestCase):
         self.assertIn('tag=u-1', called_urls[1])
 
     def test_run_test_case_task_retries_until_success(self):
+        """重试策略：一次 run 聚合为单条 TestRecord，attempt_logs 保留每次尝试明细。"""
         from django.contrib.auth import get_user_model
-        from unittest.mock import Mock
+        from .models import TestRecord as DbTestRecord
 
         user = get_user_model().objects.create_user(username='u1r', password='p1')
         project = Project.objects.create(name='p1r', owner=user)
@@ -186,16 +193,25 @@ class TestIntegrationTasks(DjangoTestCase):
         )
         case = DbTestCase.objects.create(project=project, title='case', status='active', steps=[])
 
-        rec_fail = Mock(status='failed', id=101, elapsed_time=1.0)
-        rec_ok = Mock(status='success', id=102, elapsed_time=1.1)
+        fake_fail = {'engine': None, 'success': False, 'error_message': None, 'elapsed': 1.0}
+        fake_ok = {'engine': None, 'success': True, 'error_message': None, 'elapsed': 1.1}
 
-        with patch('api.tasks._execute_case_once', side_effect=[(rec_fail, None, None), (rec_ok, None, None)]):
+        with patch('api.tasks._invoke_engine_once', side_effect=[fake_fail, fake_ok]):
             result = run_test_case_task(case.id, env.id, {}, retry_times=2)
 
         self.assertEqual(result.get('status'), 'success')
-        self.assertEqual(result.get('record_id'), 102)
         self.assertEqual(result.get('attempts'), 3)
+        self.assertEqual(result.get('attempts_made'), 2)
         self.assertEqual(result.get('retries_used'), 1)
+
+        # 数据库中应仅产生 1 条聚合记录，attempt_logs 反映两次尝试
+        records = list(DbTestRecord.objects.filter(case=case))
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec.status, 'success')
+        self.assertEqual(rec.attempts, 2)
+        self.assertEqual([a.get('status') for a in rec.attempt_logs], ['failed', 'success'])
+        self.assertAlmostEqual(rec.elapsed_time, 2.1, places=3)
 
     def test_run_test_suite_task_propagates_variables_across_cases(self):
         from django.contrib.auth import get_user_model
@@ -304,12 +320,13 @@ class TestIntegrationTasks(DjangoTestCase):
         req = factory.post('/api/envs/', {}, format='json')
         force_authenticate(req, user=user)
 
+        # db_config 仅支持 sqlite_path（安全沙箱），敏感字段的加密/脱敏验证聚焦于 variables
         payload = {
             'project': project.id,
             'name': 'env',
             'base_url': 'https://example.com',
             'variables': {'token': 'abc', 'k': 'v'},
-            'db_config': {'password': 'pw', 'sqlite_path': 'db.sqlite3'},
+            'db_config': {'sqlite_path': 'db.sqlite3'},
             'is_default': True,
         }
         create_req = factory.post('/api/envs/', payload, format='json')
@@ -320,7 +337,6 @@ class TestIntegrationTasks(DjangoTestCase):
         env_id = resp.data.get('id')
         env = EnvConfig.objects.get(id=env_id)
         self.assertTrue(str(env.variables.get('token', '')).startswith(ENC_PREFIX))
-        self.assertTrue(str(env.db_config.get('password', '')).startswith(ENC_PREFIX))
         plain_vars = decrypt_json(env.variables)
         self.assertEqual(plain_vars.get('token'), 'abc')
 
@@ -330,7 +346,17 @@ class TestIntegrationTasks(DjangoTestCase):
         self.assertEqual(list_resp.status_code, 200)
         row = list_resp.data[0]
         self.assertEqual(row['variables']['token'], MASK)
-        self.assertEqual(row['db_config']['password'], MASK)
+        # sqlite_path 非敏感键，保持明文
+        self.assertEqual(row['db_config'].get('sqlite_path'), 'db.sqlite3')
+
+        # db_config 中传入未支持键（如 host/password）应被 serializer 拒绝
+        bad_payload = dict(payload)
+        bad_payload['name'] = 'env-bad'
+        bad_payload['db_config'] = {'host': '127.0.0.1', 'password': 'pw'}
+        bad_req = factory.post('/api/envs/', bad_payload, format='json')
+        force_authenticate(bad_req, user=user)
+        bad_resp = api_views.EnvConfigViewSet.as_view({'post': 'create'})(bad_req)
+        self.assertEqual(bad_resp.status_code, 400)
 
     def test_case_version_is_created_on_create_and_update(self):
         from . import views as api_views
@@ -1255,6 +1281,34 @@ class TestViewSetIntegration(DjangoTestCase):
         self.assertIn('suggested_attempts', resp.data)
         self.assertIn('projections', resp.data)
         self.assertTrue(isinstance(resp.data.get('projections'), list))
+        self.assertIn('methodology', resp.data)
+        self.assertIn('assumptions', resp.data['methodology'])
+
+    def test_case_experiment_summary_action(self):
+        from django.contrib.auth import get_user_model
+        from . import views as api_views
+
+        user = get_user_model().objects.create_user('es1', 'StrongPass2026!')
+        project = Project.objects.create(name='p', owner=user)
+        case = DbTestCase.objects.create(
+            project=project,
+            title='exp',
+            status='active',
+            steps=[{'type': 'http', 'method': 'GET', 'url': '/ping'}],
+        )
+        case.records.create(status='success', result_log='', step_results=[], elapsed_time=1.0)
+        case.records.create(status='failed', result_log='', step_results=[], elapsed_time=1.2)
+
+        factory = APIRequestFactory()
+        req = factory.get(f'/api/cases/{case.id}/experiment_summary/')
+        force_authenticate(req, user=user)
+        resp = api_views.TestCaseViewSet.as_view({'get': 'experiment_summary'})(req, pk=str(case.id))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('execution_stats', resp.data)
+        self.assertIn('flaky_analysis', resp.data)
+        self.assertIn('strategy_comparison', resp.data)
+        self.assertEqual(resp.data['execution_stats']['sample_size'], 2)
+        self.assertGreaterEqual(len(resp.data['strategy_comparison']), 5)
 
     def test_import_openapi_creates_cases(self):
         from django.contrib.auth import get_user_model
@@ -1418,6 +1472,33 @@ class TestViewSetIntegration(DjangoTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data.get('task_id'), 'suite-task-1')
         m_task.delay.assert_called_once()
+
+
+class TestFlakyAnalysisPure(TestCase):
+    def test_empty_statuses(self):
+        r = compute_flaky_analysis_from_statuses([])
+        self.assertEqual(r['sample_size'], 0)
+        self.assertEqual(r['risk_level'], 'unknown')
+        self.assertIn('methodology', r)
+
+    def test_all_success_stable(self):
+        r = compute_flaky_analysis_from_statuses(['success'] * 12)
+        self.assertEqual(r['failure_rate'], 0.0)
+        self.assertEqual(r['risk_level'], 'low')
+
+    def test_all_failed_high_risk(self):
+        r = compute_flaky_analysis_from_statuses(['failed'] * 12)
+        self.assertEqual(r['failure_rate'], 1.0)
+        self.assertEqual(r['risk_level'], 'high')
+
+    def test_alternating_high_transition(self):
+        r = compute_flaky_analysis_from_statuses(['success', 'failed'] * 6)
+        self.assertGreater(r['transition_rate'], 0.85)
+
+    def test_error_counts_as_failure(self):
+        r = compute_flaky_analysis_from_statuses(['success', 'error'])
+        self.assertEqual(r['sample_size'], 2)
+        self.assertEqual(r['failure_rate'], 0.5)
 
 
 class TestTaskTracker(DjangoTestCase):

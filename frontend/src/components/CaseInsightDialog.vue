@@ -1,4 +1,6 @@
 <script setup>
+import { computed } from 'vue'
+
 const props = defineProps({
   visible: {
     type: Boolean,
@@ -48,6 +50,13 @@ function flakyRiskText(level) {
   if (level === 'high') return '高风险'
   return '样本不足'
 }
+
+/** experiment_summary 嵌套 flaky_analysis，兼容旧版扁平结构 */
+const flaky = computed(() => props.data?.flaky_analysis ?? props.data)
+const strategyRows = computed(() =>
+  Array.isArray(props.data?.strategy_comparison) ? props.data.strategy_comparison : [],
+)
+const methodology = computed(() => flaky.value?.methodology)
 </script>
 
 <template>
@@ -114,44 +123,76 @@ function flakyRiskText(level) {
         </el-alert>
       </template>
 
-      <template v-else-if="props.mode === 'flaky' && props.data">
+      <template v-else-if="props.mode === 'flaky' && props.data && flaky">
         <div class="insight-score-head">
           <el-progress
             type="dashboard"
-            :percentage="props.data.flaky_score"
+            :percentage="flaky.flaky_score"
             :stroke-width="12"
-            :color="props.data.flaky_score >= 70 ? '#f56c6c' : props.data.flaky_score >= 45 ? '#e6a23c' : '#67c23a'"
+            :color="flaky.flaky_score >= 70 ? '#f56c6c' : flaky.flaky_score >= 45 ? '#e6a23c' : '#67c23a'"
           />
           <div class="insight-score-meta">
-            <div class="insight-score-title">Flaky 风险分：{{ props.data.flaky_score }}</div>
-            <el-tag :type="flakyRiskTag(props.data.risk_level)" size="large">
-              {{ flakyRiskText(props.data.risk_level) }}
+            <div class="insight-score-title">Flaky 风险分：{{ flaky.flaky_score }}</div>
+            <el-tag :type="flakyRiskTag(flaky.risk_level)" size="large">
+              {{ flakyRiskText(flaky.risk_level) }}
             </el-tag>
-            <div class="insight-score-sub">{{ props.data.message }}</div>
+            <div class="insight-score-sub">{{ flaky.message }}</div>
           </div>
         </div>
 
         <el-divider content-position="left">Flaky 分析指标</el-divider>
         <div class="insight-metrics">
-          <el-tag>样本数: {{ props.data.sample_size }}</el-tag>
-          <el-tag type="danger">失败率: {{ (props.data.failure_rate * 100).toFixed(1) }}%</el-tag>
-          <el-tag type="warning">EWMA失败趋势: {{ (props.data.ewma_failure * 100).toFixed(1) }}%</el-tag>
-          <el-tag type="info">状态切换率: {{ (props.data.transition_rate * 100).toFixed(1) }}%</el-tag>
-          <el-tag>Wilson上界: {{ (props.data.wilson_failure_upper * 100).toFixed(1) }}%</el-tag>
-          <el-tag type="success">建议重试次数: {{ props.data.suggested_retries }}</el-tag>
-          <el-tag type="success">建议总尝试次数: {{ props.data.suggested_attempts }}</el-tag>
+          <el-tag>样本数: {{ flaky.sample_size }}</el-tag>
+          <el-tag type="danger">失败率: {{ (flaky.failure_rate * 100).toFixed(1) }}%</el-tag>
+          <el-tag type="warning">EWMA失败趋势: {{ (flaky.ewma_failure * 100).toFixed(1) }}%</el-tag>
+          <el-tag type="info">状态切换率: {{ (flaky.transition_rate * 100).toFixed(1) }}%</el-tag>
+          <el-tag>Wilson上界: {{ (flaky.wilson_failure_upper * 100).toFixed(1) }}%</el-tag>
+          <el-tag type="success">建议重试次数: {{ flaky.suggested_retries }}</el-tag>
+          <el-tag type="success">建议总尝试次数: {{ flaky.suggested_attempts }}</el-tag>
         </div>
 
         <el-divider content-position="left">重试成功率预测</el-divider>
-        <div class="insight-metrics" v-if="Array.isArray(props.data.projections) && props.data.projections.length">
+        <div class="insight-metrics" v-if="Array.isArray(flaky.projections) && flaky.projections.length">
           <el-tag
-            v-for="item in props.data.projections"
+            v-for="item in flaky.projections"
             :key="item.attempts"
             type="info"
           >
             {{ item.attempts }} 次尝试 ≈ {{ (item.projected_success * 100).toFixed(1) }}% 成功率
           </el-tag>
         </div>
+
+        <template v-if="strategyRows.length">
+          <el-divider content-position="left">策略对比（论文制表）</el-divider>
+          <el-table :data="strategyRows" stripe size="small" class="strategy-table">
+            <el-table-column prop="label" label="策略" min-width="220" show-overflow-tooltip />
+            <el-table-column prop="retry_times" label="retry_times" width="100" align="center" />
+            <el-table-column prop="max_attempts" label="总尝试" width="88" align="center" />
+            <el-table-column label="投影成功率(≥一次)" width="160" align="center">
+              <template #default="{ row }">
+                {{
+                  row.projected_at_least_one_success == null
+                    ? '—'
+                    : (row.projected_at_least_one_success * 100).toFixed(1) + '%'
+                }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+
+        <el-collapse v-if="methodology" class="methodology-collapse">
+          <el-collapse-item title="模型假设与局限（方法论）" name="meta">
+            <p class="methodology-p"><strong>有效权重</strong>：Wilson {{ methodology.weights?.wilson_failure_upper }} · 切换率 {{ methodology.weights?.transition_rate }} · EWMA {{ methodology.weights?.ewma_failure }}（EWMA α={{ methodology.ewma_alpha }}）</p>
+            <p class="methodology-h">假设</p>
+            <ul class="methodology-ul">
+              <li v-for="(a, i) in methodology.assumptions" :key="'a'+i">{{ a }}</li>
+            </ul>
+            <p class="methodology-h">局限</p>
+            <ul class="methodology-ul">
+              <li v-for="(b, i) in methodology.limitations" :key="'b'+i">{{ b }}</li>
+            </ul>
+          </el-collapse-item>
+        </el-collapse>
 
         <el-alert type="success" :closable="false" style="margin-top: 14px">
           Flaky 分析融合 Wilson 上界、状态切换率与 EWMA；建议重试与「自适应执行」按钮共用同一套决策结果。
@@ -199,6 +240,35 @@ function flakyRiskText(level) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.strategy-table {
+  width: 100%;
+}
+
+.methodology-collapse {
+  margin-top: 12px;
+}
+
+.methodology-p {
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 10px;
+  color: var(--el-text-color-regular);
+}
+
+.methodology-h {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 8px 0 4px;
+}
+
+.methodology-ul {
+  margin: 0 0 8px 16px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--el-text-color-secondary);
 }
 
 @media (max-width: 900px) {

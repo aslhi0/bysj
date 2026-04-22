@@ -27,6 +27,8 @@ def build_test_record_report_json_payload(record, screenshot_url):
         "project_name": project.name,
         "status": record.status,
         "elapsed_time": record.elapsed_time,
+        "attempts": getattr(record, "attempts", 1),
+        "attempt_logs": getattr(record, "attempt_logs", []) or [],
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "result_log": record.result_log or "",
         "step_results": record.step_results or [],
@@ -75,6 +77,32 @@ def build_test_record_report_html(record, screenshot_url):
     elapsed_time = esc(f"{record.elapsed_time:.2f}")
     title = esc(case.title)
     project_name = esc(project.name)
+    attempts_val = int(getattr(record, "attempts", 1) or 1)
+    attempt_logs_val = getattr(record, "attempt_logs", []) or []
+
+    attempts_block = ""
+    if attempts_val > 1 and isinstance(attempt_logs_val, list) and attempt_logs_val:
+        att_rows = []
+        for item in attempt_logs_val:
+            if not isinstance(item, dict):
+                continue
+            att_st = str(item.get("status") or "")
+            att_color = "#67C23A" if att_st == "success" else ("#E6A23C" if att_st == "error" else "#F56C6C")
+            att_label = {"success": "通过", "failed": "失败", "error": "异常"}.get(att_st, att_st)
+            att_rows.append(
+                f"<tr>"
+                f"<td>{esc(item.get('attempt'))}</td>"
+                f"<td style='color:{att_color};font-weight:600'>{esc(att_label)}</td>"
+                f"<td>{esc(item.get('elapsed'))}</td>"
+                f"<td style='font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px'>{esc(item.get('error_message') or '')}</td>"
+                f"</tr>"
+            )
+        attempts_block = (
+            f"<h2>重试历史（共 {attempts_val} 次尝试）</h2>"
+            "<table>"
+            "<thead><tr><th>#</th><th>结果</th><th>耗时(s)</th><th>错误信息</th></tr></thead>"
+            f"<tbody>{''.join(att_rows)}</tbody></table>"
+        )
 
     screenshot_block = ""
     if screenshot_url:
@@ -116,6 +144,7 @@ def build_test_record_report_html(record, screenshot_url):
         "<tbody>"
         + "".join(step_rows)
         + "</tbody></table>"
+        f"{attempts_block}"
         f"{screenshot_block}"
         "<h2>原始日志</h2>"
         f"<pre>{full_log}</pre>"

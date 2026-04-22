@@ -1,7 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from rest_framework.schemas import get_schema_view
-from rest_framework.permissions import AllowAny
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from .health import health_check
 from .views import (
     ProjectViewSet, TestCaseViewSet, TestSuiteViewSet,
@@ -20,11 +19,12 @@ router.register(r'records', TestRecordViewSet)
 router.register(r'suite-runs', SuiteRunViewSet)
 router.register(r'audit-logs', AuditLogViewSet)
 
-schema_view = get_schema_view(title='AutoTest API', version='1.0.0', permission_classes=[AllowAny])
-
 urlpatterns = [
     path('health/', health_check),
-    path('schema/', schema_view),
+    # OpenAPI 3.0：schema + Swagger UI + Redoc，替换原 CoreAPI get_schema_view。
+    path('schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('schema/swagger/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+    path('schema/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
     path('auth/register/', RegisterView.as_view()),
     path('auth/me/', MeView.as_view()),
     path('auth/users/', AdminUserListView.as_view()),

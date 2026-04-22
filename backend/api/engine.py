@@ -23,6 +23,15 @@ _VAR_RE = re.compile(r'\{\{[ ]?(\w+)[ ]?\}\}|\[\[[ ]?(\w+)[ ]?\]\]')
 _FAKER_RE = re.compile(r'(\{\{|\[\[)faker\.(\w+)(\}\}|\]\])')
 
 def validate_outbound_http_url(url, *, allowed_hosts=None):
+    """SSRF 边界校验。
+
+    调用约定：
+    - ``allowed_hosts=None`` → 对 *不可信 URL*（如用户配置的 webhook）做完整 DNS 审查，
+      拒绝任何解析到内网/回环/保留网段的 host。
+    - ``allowed_hosts=[host]`` → 调用方明确断言"host 已经受信"（例如 engine 内
+      ``base_url`` 为管理员配置、或 webhook 目标命中代码内置白名单），此时只校验
+      host 字符串匹配，跳过昂贵且在部分内网/企业 DNS 会误伤的解析动作。
+    """
     if not isinstance(url, str) or not url.strip():
         raise ValueError('url 不能为空')
     parsed = urlparse(url)
@@ -237,11 +246,15 @@ class TestEngine:
                 # id_card 是平台约定的别名，映射到 faker.ssn()
                 if method == 'id_card':
                     method = 'ssn'
+                # 禁止访问 dunder / 下划线开头的内部属性，避免 getattr 被诱导取到
+                # __class__ / _Generator__* 这类对象；也缩小攻击面到 public provider。
+                if not method or method.startswith('_'):
+                    return m.group(0)
                 attr = getattr(self.faker, method, None)
-                if attr is None:
+                if attr is None or not callable(attr):
                     return m.group(0)
                 try:
-                    return str(attr() if callable(attr) else attr)
+                    return str(attr())
                 except Exception:
                     return m.group(0)
             text = _FAKER_RE.sub(_faker_sub, text)

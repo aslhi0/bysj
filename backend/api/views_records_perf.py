@@ -23,7 +23,6 @@ from .report_utils import (
     pick_aggregated_row,
 )
 from .serializers import TestRecordSerializer, SuiteRunSerializer, PerfRecordSerializer
-from .tasks import reconcile_stale_perf_records
 
 
 class TestRecordViewSet(viewsets.ReadOnlyModelViewSet):
@@ -104,11 +103,8 @@ class PerfRecordViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # 自愈历史遗留的长时间 running/queued 记录，避免前端永久转圈。
-        try:
-            reconcile_stale_perf_records()
-        except Exception:
-            pass
+        # 脏状态收敛改由 Celery beat 周期执行（`reconcile_perf_records_task`），
+        # 请求路径不再做全表扫描 + 磁盘 stat，降低列表接口 P95 延迟。
         qs = super().get_queryset()
         user = self.request.user
         return apply_project_access_filter(qs, user, "case__project").order_by("-created_at")
@@ -209,7 +205,7 @@ class PerfRecordViewSet(mixins.DestroyModelMixin, viewsets.ReadOnlyModelViewSet)
         if env and isinstance(env.variables, dict):
             merged_vars.update(decrypt_json(env.variables))
         if isinstance(case.variables, dict):
-            merged_vars.update(case.variables)
+            merged_vars.update(decrypt_json(case.variables))
         if base_url:
             merged_vars["base_url"] = base_url
 

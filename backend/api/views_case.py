@@ -1,7 +1,6 @@
 """TestCase viewset and related actions."""
 from datetime import timedelta
 import json
-import math
 import os
 import re
 import time
@@ -11,6 +10,7 @@ import requests
 import yaml
 from django.contrib.admin.models import ADDITION, CHANGE, DELETION
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -21,6 +21,11 @@ from rest_framework.response import Response
 from .audit_utils import audit_log
 from .crypto_utils import decrypt_json
 from .engine import validate_outbound_http_url
+from .flaky_analysis import (
+    build_execution_stats_for_case,
+    build_strategy_comparison,
+    compute_flaky_analysis_for_case,
+)
 from .locust_codegen import generate_locust_code
 from .models import EnvConfig, PerfRecord, Project, TestCase, TestCaseVersion
 from .query_utils import apply_project_access_filter
@@ -89,146 +94,20 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         return env_id
 
     def _compute_flaky_analysis(self, case, *, target_success=0.95, max_attempts=3):
-        recent_records = list(case.records.all().order_by("-created_at")[:30])
-        if not recent_records:
-            return {
-                "sample_size": 0,
-                "flaky_score": 0,
-                "risk_level": "unknown",
-                "failure_rate": 0.0,
-                "ewma_failure": 0.0,
-                "transition_rate": 0.0,
-                "wilson_failure_upper": 0.0,
-                "suggested_retries": 0,
-                "suggested_attempts": 1,
-                "projections": [],
-                "message": "暂无执行样本，请先运行该用例后再分析。",
-                "warning": "样本量不足，分析结果不可靠",
-                "meta": {
-                    "target_success": float(target_success),
-                    "max_attempts": int(max_attempts),
-                },
-            }
-
-        timeline = list(reversed(recent_records))
-        seq = []
-        for r in timeline:
-            seq.append(1 if r.status in {"failed", "error"} else 0)
-        n = len(seq)
-        fail_count = sum(seq)
-        failure_rate = fail_count / n if n else 0.0
-
-        # 样本量不足时的警告
-        if n < 5:
-            warning = f"当前样本量仅 {n} 次，建议至少运行 5 次后再依据分析结果制定策略。"
-            confidence_level = "low"
-        elif n < 10:
-            warning = f"当前样本量为 {n} 次，建议增加至 10 次以上以提高分析可信度。"
-            confidence_level = "medium"
-        else:
-            warning = None
-            confidence_level = "high"
-
-        alpha = 0.35
-        ewma = seq[0] if seq else 0.0
-        for x in seq[1:]:
-            ewma = alpha * x + (1 - alpha) * ewma
-
-        transitions = 0
-        for i in range(1, n):
-            if seq[i] != seq[i - 1]:
-                transitions += 1
-        transition_rate = transitions / (n - 1) if n > 1 else 0.0
-
-        z = 1.96
-        if n > 0:
-            p = failure_rate
-            denom = 1 + (z * z) / n
-            center = (p + (z * z) / (2 * n)) / denom
-            margin = (
-                z
-                * math.sqrt((p * (1 - p) + (z * z) / (4 * n)) / n)
-                / denom
-            )
-            wilson_upper = min(1.0, max(0.0, center + margin))
-        else:
-            wilson_upper = 0.0
-
-        flaky_score = int(
-            round(
-                min(
-                    100.0,
-                    max(
-                        0.0,
-                        100.0
-                        * (0.50 * wilson_upper + 0.30 * transition_rate + 0.20 * ewma),
-                    ),
-                )
-            )
-        )
-
-        if flaky_score >= 70:
-            risk_level = "high"
-        elif flaky_score >= 45:
-            risk_level = "medium"
-        else:
-            risk_level = "low"
-
-        projections = []
-        suggested_attempts = int(max_attempts)
-        for attempts in range(1, int(max_attempts) + 1):
-            projected_success = 1 - (wilson_upper ** attempts)
-            projections.append(
-                {
-                    "attempts": attempts,
-                    "projected_success": round(projected_success, 4),
-                }
-            )
-            if projected_success >= float(target_success) and suggested_attempts == int(max_attempts):
-                suggested_attempts = attempts
-
-        suggested_retries = max(0, suggested_attempts - 1)
-
-        # 构建分析消息
-        if n >= 10:
-            message = "分值越高表示该用例近期越不稳定；建议按预测成功率动态设置重试次数。"
-        else:
-            message = f"当前样本量为 {n} 次，分析结果可信度有限。建议增加执行次数后再依据分析结果制定策略。"
-
-        result = {
-            "sample_size": n,
-            "flaky_score": flaky_score,
-            "risk_level": risk_level,
-            "failure_rate": round(failure_rate, 4),
-            "ewma_failure": round(float(ewma), 4),
-            "transition_rate": round(transition_rate, 4),
-            "wilson_failure_upper": round(wilson_upper, 4),
-            "suggested_retries": suggested_retries,
-            "suggested_attempts": suggested_attempts,
-            "projections": projections,
-            "message": message,
-            "confidence_level": confidence_level,
-            "meta": {
-                "target_success": float(target_success),
-                "max_attempts": int(max_attempts),
-            },
-        }
-
-        if warning:
-            result["warning"] = warning
-
-        return result
+        return compute_flaky_analysis_for_case(case, target_success=target_success, max_attempts=max_attempts)
 
     def perform_create(self, serializer):
         self._ensure_admin()
-        case = serializer.save()
-        self.create_version(case, self.request.user)
+        with transaction.atomic():
+            case = serializer.save()
+            self.create_version(case, self.request.user)
         audit_log(self.request.user, case, ADDITION, f"创建用例: {case.title}")
 
     def perform_update(self, serializer):
         self._ensure_admin()
-        case = serializer.save()
-        self.create_version(case, self.request.user)
+        with transaction.atomic():
+            case = serializer.save()
+            self.create_version(case, self.request.user)
         audit_log(self.request.user, case, CHANGE, f"更新用例: {case.title}")
 
     def perform_destroy(self, instance):
@@ -259,11 +138,12 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         if tv is None:
             return Response({"detail": "版本不存在"}, status=status.HTTP_404_NOT_FOUND)
         snap = tv.snapshot if isinstance(tv.snapshot, dict) else {}
-        for f in ["title", "steps", "variables", "tags", "setup_sql", "teardown_sql", "status"]:
-            if f in snap:
-                setattr(case, f, snap.get(f))
-        case.save()
-        self.create_version(case, request.user)
+        with transaction.atomic():
+            for f in ["title", "steps", "variables", "tags", "setup_sql", "teardown_sql", "status"]:
+                if f in snap:
+                    setattr(case, f, snap.get(f))
+            case.save()
+            self.create_version(case, request.user)
         audit_log(request.user, case, CHANGE, f"回滚用例版本: {case.title}")
         return Response({"detail": "已回滚并生成新版本"})
 
@@ -354,7 +234,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         if env and isinstance(env.variables, dict):
             merged_vars.update(decrypt_json(env.variables))
         if isinstance(case.variables, dict):
-            merged_vars.update(case.variables)
+            merged_vars.update(decrypt_json(case.variables))
         if base_url:
             merged_vars["base_url"] = base_url
         try:
@@ -568,6 +448,39 @@ class TestCaseViewSet(viewsets.ModelViewSet):
                 "case_id": case.id,
                 "case_title": case.title,
                 **data,
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def experiment_summary(self, request, pk=None):
+        """实验对比摘要：执行统计、Flaky 分析、固定重试 vs run_smart 策略行（便于论文制表）。"""
+        case = self.get_object()
+        try:
+            target_success = float(request.query_params.get("target_success", 0.95))
+        except Exception:
+            target_success = 0.95
+        target_success = max(0.80, min(target_success, 0.99))
+        try:
+            max_attempts = int(request.query_params.get("max_attempts", 3))
+        except Exception:
+            max_attempts = 3
+        max_attempts = max(1, min(max_attempts, 4))
+
+        flaky = self._compute_flaky_analysis(case, target_success=target_success, max_attempts=max_attempts)
+        execution_stats = build_execution_stats_for_case(case)
+        strategy_comparison = build_strategy_comparison(flaky)
+
+        return Response(
+            {
+                "case_id": case.id,
+                "case_title": case.title,
+                "execution_stats": execution_stats,
+                "flaky_analysis": flaky,
+                "strategy_comparison": strategy_comparison,
+                "notes": {
+                    "fixed_rows": "retry_times 0~3 对应 POST /cases/{id}/run/ 的手动重试上限；投影基于 Wilson 失败率上界与独立尝试假设。",
+                    "adaptive_row": "与 POST /cases/{id}/run_smart/ 使用的建议一致；请在相同 target_success/max_attempts 下对比。",
+                },
             }
         )
 
@@ -844,26 +757,40 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         # 构建 schema 解析器
         _from_schema = self._build_schema_helpers(spec)
 
-        # 遍历并创建用例
+        # 遍历并创建用例（原子事务：中途失败则整体回滚，避免部分脏数据污染项目）
         count = 0
+        truncated = False
         allowed_methods = {"get", "post", "put", "delete", "patch", "head", "options"}
 
-        for path, methods in paths.items():
-            if not isinstance(path, str) or not path.startswith("/") or len(path) > 500 or not isinstance(methods, dict):
-                continue
-            for method, info in methods.items():
-                if str(method).lower() not in allowed_methods:
+        with transaction.atomic():
+            for path, methods in paths.items():
+                if not isinstance(path, str) or not path.startswith("/") or len(path) > 500 or not isinstance(methods, dict):
                     continue
-                if not isinstance(info, dict):
-                    info = {}
+                for method, info in methods.items():
+                    if str(method).lower() not in allowed_methods:
+                        continue
+                    if not isinstance(info, dict):
+                        info = {}
 
-                created = self._create_test_case_from_openapi(
-                    path, method, info, params["project"],
-                    params["on_conflict"], _from_schema
-                )
-                if created:
-                    count += 1
-                    if count >= max_cases_created:
-                        return Response({"count": count, "truncated": True})
+                    created = self._create_test_case_from_openapi(
+                        path, method, info, params["project"],
+                        params["on_conflict"], _from_schema
+                    )
+                    if created:
+                        count += 1
+                        if count >= max_cases_created:
+                            truncated = True
+                            break
+                if truncated:
+                    break
 
-        return Response({"count": count})
+        if count > 0:
+            suffix = '（已截断）' if truncated else ''
+            audit_log(
+                request.user,
+                params["project"],
+                ADDITION,
+                f'OpenAPI 批量导入用例 {count} 条{suffix}，on_conflict={params["on_conflict"]}',
+            )
+
+        return Response({"count": count, "truncated": truncated})

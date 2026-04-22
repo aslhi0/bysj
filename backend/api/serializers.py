@@ -63,13 +63,27 @@ class EnvConfigSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at']
     
+    # 当前数据库断言仅支持项目根下的 SQLite 文件（见 engine.run_db_query）。
+    # 显式枚举允许键，避免用户配置 host/port/user/password 等多 DB 字段后被静默忽略
+    # ——那会带来"配置了却不生效"的 UI/实现错位。
+    _DB_CONFIG_ALLOWED_KEYS = {'sqlite_path'}
+
     def validate_db_config(self, value):
         if value is None:
             return {}
-        if isinstance(value, dict):
-            _validate_json_limits(value, max_depth=6, max_keys=100, max_list=200, max_str=20000, max_nodes=2000)
-            return value
-        raise serializers.ValidationError('db_config 必须是 JSON 对象')
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('db_config 必须是 JSON 对象')
+        _validate_json_limits(value, max_depth=6, max_keys=100, max_list=200, max_str=20000, max_nodes=2000)
+        unsupported = [k for k in value.keys() if k not in self._DB_CONFIG_ALLOWED_KEYS]
+        if unsupported:
+            raise serializers.ValidationError(
+                f'db_config 暂仅支持键 {sorted(self._DB_CONFIG_ALLOWED_KEYS)}，'
+                f'以下键不受支持：{unsupported}'
+            )
+        sqlite_path = value.get('sqlite_path')
+        if sqlite_path is not None and not isinstance(sqlite_path, str):
+            raise serializers.ValidationError('sqlite_path 必须是字符串')
+        return value
     
     def validate_variables(self, value):
         if value is None:
@@ -147,6 +161,27 @@ class TestCaseSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = ['id', 'project_name', 'updated_at', 'created_at']
+
+    def to_representation(self, instance):
+        # 读取时对敏感 key 做脱敏（与 EnvConfig 同策略）：只屏蔽 password/token/...
+        # 非敏感 key 保持明文，保证现有用例 UI（如 url/method）的可读性与兼容历史数据。
+        data = super().to_representation(instance)
+        if isinstance(data.get('variables'), dict):
+            data['variables'] = mask_json(data['variables'])
+        return data
+
+    def create(self, validated_data):
+        if isinstance(validated_data.get('variables'), dict):
+            validated_data['variables'] = encrypt_json(validated_data['variables'])
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if isinstance(validated_data.get('variables'), dict):
+            # decrypt_json 对未加密值原样返回，天然兼容加密前写入的历史用例
+            old_vars = decrypt_json(instance.variables or {}) if isinstance(instance.variables, dict) else {}
+            merged = merge_masked(old_vars, validated_data['variables'])
+            validated_data['variables'] = encrypt_json(merged)
+        return super().update(instance, validated_data)
     
     def validate_project(self, value):
         req = self.context.get('request')
@@ -246,7 +281,25 @@ class TestSuiteSerializer(serializers.ModelSerializer):
             _validate_json_limits(value, max_depth=8, max_keys=200, max_list=500, max_str=50000, max_nodes=5000)
             return value
         raise serializers.ValidationError('variables 必须是 JSON 对象')
-    
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if isinstance(data.get('variables'), dict):
+            data['variables'] = mask_json(data['variables'])
+        return data
+
+    def create(self, validated_data):
+        if isinstance(validated_data.get('variables'), dict):
+            validated_data['variables'] = encrypt_json(validated_data['variables'])
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if isinstance(validated_data.get('variables'), dict):
+            old_vars = decrypt_json(instance.variables or {}) if isinstance(instance.variables, dict) else {}
+            merged = merge_masked(old_vars, validated_data['variables'])
+            validated_data['variables'] = encrypt_json(merged)
+        return super().update(instance, validated_data)
+
     def validate_ordered_case_ids(self, value):
         if value is None:
             return []
@@ -289,9 +342,11 @@ class TestRecordSerializer(serializers.ModelSerializer):
             'step_results',
             'screenshot',
             'elapsed_time',
+            'attempts',
+            'attempt_logs',
             'created_at',
         ]
-        read_only_fields = ['id', 'case_title', 'created_at']
+        read_only_fields = ['id', 'case_title', 'attempts', 'attempt_logs', 'created_at']
 
 class SuiteRunSerializer(serializers.ModelSerializer):
     class Meta:

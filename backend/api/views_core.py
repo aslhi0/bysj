@@ -2,6 +2,7 @@
 
 from django.contrib.admin.models import ADDITION, CHANGE, DELETION, LogEntry
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -131,7 +132,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
             if target is None:
                 raise ValidationError("owner 不存在")
             owner = target
-        obj = serializer.save(owner=owner)
+        with transaction.atomic():
+            obj = serializer.save(owner=owner)
         audit_log(self.request.user, obj, ADDITION, f"创建项目: {obj.name}")
 
     def perform_update(self, serializer):
@@ -162,11 +164,13 @@ class ProjectViewSet(viewsets.ModelViewSet):
         user = User.objects.filter(id=user_id).first()
         if user is None:
             raise ValidationError("user 不存在")
-        pm, _ = ProjectMember.objects.update_or_create(
-            project=project,
-            user=user,
-            defaults={"is_active": True},
-        )
+        with transaction.atomic():
+            pm, _ = ProjectMember.objects.update_or_create(
+                project=project,
+                user=user,
+                defaults={"is_active": True},
+            )
+        audit_log(request.user, project, CHANGE, f'添加成员: {user.username}')
         return Response(ProjectMemberSerializer(pm).data)
 
     @action(detail=True, methods=["post"])
@@ -176,5 +180,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
         user_id = request.data.get("user_id")
         if not user_id:
             raise ValidationError("缺少 user_id")
-        ProjectMember.objects.filter(project=project, user_id=user_id).delete()
+        with transaction.atomic():
+            deleted, _ = ProjectMember.objects.filter(project=project, user_id=user_id).delete()
+        if deleted:
+            audit_log(request.user, project, CHANGE, f'移除成员 user_id={user_id}')
         return Response({"detail": "成员已移除"})

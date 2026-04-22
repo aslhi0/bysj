@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { HomeFilled, Files, List, Collection, Operation as Odometer, Monitor, DataLine, Document } from '@element-plus/icons-vue'
-import { clearTokens, getAccessToken } from './api'
+import { clearTokens } from './api'
 import { useCurrentUser } from './auth'
 import { INNOVATION_TAGLINE, PLATFORM_NAME } from './branding'
 
@@ -20,22 +20,7 @@ const menuItems = [
   { path: '/audit', name: 'audit', icon: Document, label: '审计日志', adminOnly: true },
 ]
 
-function parseJwtUsername(token) {
-  try {
-    const p = token.split('.')[1]
-    const json = atob(p.replace(/-/g, '+').replace(/_/g, '/'))
-    const obj = JSON.parse(decodeURIComponent(escape(json)))
-    return obj.username || obj.user || obj.sub || ''
-  } catch {
-    return ''
-  }
-}
-
-const username = computed(() => {
-  const token = getAccessToken()
-  const u = token ? parseJwtUsername(token) : ''
-  return u || 'User'
-})
+const username = computed(() => currentUser.value?.username || 'User')
 
 const visibleMenuItems = computed(() => menuItems.filter((item) => !item.adminOnly || isAdminUser.value))
 

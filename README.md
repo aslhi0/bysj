@@ -122,6 +122,7 @@ d:\test\venv\Scripts\python.exe seed_demo_data.py
 - `POST /api/cases/{id}/run_smart/`（自适应执行策略，依赖 Flaky 分析结果）
 - `GET /api/cases/{id}/quality_insight/`
 - `GET /api/cases/{id}/flaky_insight/`
+- `GET /api/cases/{id}/experiment_summary/`（执行统计 + Flaky 分析 + 固定重试 vs `run_smart` 对比行，便于论文制表；查询参数与 `flaky_insight` 一致：`target_success`、`max_attempts`）
 
 ### 7.3 性能测试
 
@@ -145,7 +146,22 @@ cd /d d:\test\frontend
 npm run build
 ```
 
-## 9. 安全设计要点
+## 9. Flaky 分析可调参数（环境变量）
+
+可在部署时覆盖以下变量（`core/settings.py` 中自动归一化权重）：
+
+| 变量 | 含义 | 默认 |
+|------|------|------|
+| `FLAKY_WEIGHT_WILSON` | Wilson 失败率上界权重 | 0.5 |
+| `FLAKY_WEIGHT_TRANSITION` | 成败切换率权重 | 0.3 |
+| `FLAKY_WEIGHT_EWMA` | EWMA 失败趋势权重 | 0.2 |
+| `FLAKY_EWMA_ALPHA` | EWMA 平滑系数 | 0.35 |
+| `FLAKY_WILSON_Z` | Wilson 区间 z 值（如 1.96≈95%） | 1.96 |
+| `FLAKY_RECENT_WINDOW` | 参与分析的最近执行条数 | 30（5～200） |
+
+API 响应中的 `methodology` 字段说明了模型假设与局限；`flaky_insight` 与 `experiment_summary` 均包含该说明。
+
+## 10. 安全设计要点
 
 - JWT 鉴权与角色隔离
 - 项目级数据访问控制（owner/member）
@@ -153,7 +169,7 @@ npm run build
 - SQL 执行约束（关键字、模式、路径越界）
 - 敏感字段加密存储与脱敏返回
 
-## 10. 论文与复审建议
+## 11. 论文与复审建议
 
 建议围绕三个证据链展开：
 
@@ -167,13 +183,13 @@ npm run build
 - 重试策略前后成功率提升
 - RPS、失败率、响应时间（性能维度）
 
-## 11. 已知边界
+## 12. 已知边界
 
 - UI 动作目前以通用原子动作为主，可继续封装业务动作库
 - ECharts 体积仍较大，可进一步迁移到 `echarts/core`
 - 生产部署建议 `PostgreSQL + Redis + 独立 Worker`
 
-## 12. 说明
+## 13. 说明
 
 本项目用于教学与毕业设计演示。  
 使用第三方公开站点（SauceDemo / Postman Echo）请遵守其使用条款并控制访问频率。

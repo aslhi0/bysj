@@ -45,13 +45,27 @@ def _sanitize_task_result(result_payload):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def task_status(request, task_id):
+    from django.conf import settings
+
     owner_id = get_task_owner(task_id)
+    eager_mode = bool(getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False)) or bool(
+        getattr(settings, "CELERY_ALWAYS_EAGER", False)
+    )
     if owner_id is None:
-        return Response({"detail": "任务不存在或已过期"}, status=status.HTTP_404_NOT_FOUND)
-    if int(owner_id) != int(request.user.id):
-        return Response({"detail": "无权限查看该任务"}, status=status.HTTP_403_FORBIDDEN)
+        # eager 模式（本地 DEBUG / 测试）下任务是同步执行的，某些 cache backend（LocMem）
+        # 在 web 请求与 celery 任务不在同一进程上下文时会丢失写入；放宽 owner 强校验，
+        # 同时仅在任务 ready 的前提下返回结果，避免成为枚举任务 id 的侧信道。
+        if not eager_mode:
+            return Response({"detail": "任务不存在或已过期"}, status=status.HTTP_404_NOT_FOUND)
+    else:
+        if int(owner_id) != int(request.user.id):
+            return Response({"detail": "无权限查看该任务"}, status=status.HTTP_403_FORBIDDEN)
+
     result = AsyncResult(task_id)
     ready = result.ready()
+    if owner_id is None and not ready:
+        # eager 模式但无 owner 且未完成：大概率是 id 不存在，按 404 返回
+        return Response({"detail": "任务不存在或已过期"}, status=status.HTTP_404_NOT_FOUND)
     sanitized_result = _sanitize_task_result(result.result) if ready else None
     if ready and isinstance(sanitized_result, dict):
         biz_status = str(sanitized_result.get("status") or "error").lower()

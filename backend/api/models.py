@@ -39,7 +39,15 @@ class EnvConfig(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='envs', verbose_name='所属项目')
     name = models.CharField('环境名称', max_length=50)
     base_url = models.URLField('基础URL', blank=True)
-    db_config = models.JSONField('数据库配置', default=dict, help_text='{"host": "...", "port": 3306, "user": "...", "password": "...", "database": "..."}', blank=True)
+    db_config = models.JSONField(
+        '数据库配置',
+        default=dict,
+        blank=True,
+        help_text=(
+            '数据库断言当前仅支持项目根下的 SQLite 文件（安全沙箱约束）。'
+            '可用键：sqlite_path（相对路径，不可绝对路径或 ..），示例：{"sqlite_path": "db.sqlite3"}。'
+        ),
+    )
     variables = models.JSONField('环境变量', default=dict, help_text='如数据库连接、Token等')
     is_default = models.BooleanField('是否默认', default=False)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
@@ -122,6 +130,9 @@ class TestRecord(models.Model):
     step_results = models.JSONField('步骤详情', default=list, blank=True)
     screenshot = models.ImageField('失败截图', upload_to='screenshots/%Y/%m/%d/', blank=True, null=True)
     elapsed_time = models.FloatField('耗时(s)', default=0.0)
+    # 一次用户触发（含内部重试）聚合为单条 TestRecord，便于 Flaky 分析按样本统计而非按尝试统计。
+    attempts = models.IntegerField('实际尝试次数', default=1)
+    attempt_logs = models.JSONField('尝试明细', default=list, blank=True)
     created_at = models.DateTimeField('执行时间', auto_now_add=True)
 
     class Meta:

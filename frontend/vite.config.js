@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import AutoImport from 'unplugin-auto-import/vite'
@@ -16,6 +17,11 @@ export default defineConfig({
       resolvers: [ElementPlusResolver()],
     }),
   ],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    include: ['src/**/*.{test,spec}.{js,ts}'],
+  },
   server: {
     proxy: {
       // 开发环境统一走相对路径 /api/*，避免浏览器跨域与 CSRF 复杂度

@@ -22,6 +22,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_celery_beat',
+    'drf_spectacular',
     'api',
 ]
 
@@ -122,6 +123,16 @@ REST_FRAMEWORK = {
         'login': '10/min',
         'token_refresh': '30/min',
     },
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+# OpenAPI / Swagger：drf-spectacular 取代老版 CoreAPI schema，生成 OpenAPI 3.0 文档。
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'AutoTest API',
+    'DESCRIPTION': '接口自动化测试平台 REST API',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
 }
 
 SIMPLE_JWT = {
@@ -160,6 +171,59 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+# Celery beat：把 PerfRecord 脏状态收敛从请求路径移到定时任务，降低列表接口延迟。
+# eager 模式（本地/测试）下 beat 不会启动，故无需额外判断。
+CELERY_BEAT_SCHEDULE = {
+    'reconcile-perf-records': {
+        'task': 'api.tasks.reconcile_perf_records_task',
+        'schedule': float(os.getenv('PERF_RECONCILE_INTERVAL_SECONDS', '120')),
+    },
+}
+
+# 缓存：DRF 限流与 task_tracker 依赖共享缓存；多进程/多容器必须指向 Redis，否则
+# web/worker 之间无法交换 task 归属信息，限流配额也会按进程割裂。
+_cache_url = os.getenv('DJANGO_CACHE_URL')
+if not _cache_url and not CELERY_ALWAYS_EAGER:
+    # 默认复用 Celery 的 Redis 实例，换一个 db（2）避免与 broker/result 冲突
+    _broker = os.getenv('CELERY_BROKER_URL', '')
+    if _broker.startswith('redis://'):
+        _cache_url = _broker.rsplit('/', 1)[0] + '/2'
+if _cache_url:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': _cache_url,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'autotest-default',
+        }
+    }
+
+# Flaky 分析：Wilson / 切换率 / EWMA 融合权重（环境变量可覆盖，自动归一化）
+_flaky_w1 = float(os.getenv('FLAKY_WEIGHT_WILSON', '0.5'))
+_flaky_w2 = float(os.getenv('FLAKY_WEIGHT_TRANSITION', '0.3'))
+_flaky_w3 = float(os.getenv('FLAKY_WEIGHT_EWMA', '0.2'))
+_flaky_wsum = _flaky_w1 + _flaky_w2 + _flaky_w3
+if _flaky_wsum <= 0:
+    FLAKY_WEIGHT_WILSON, FLAKY_WEIGHT_TRANSITION, FLAKY_WEIGHT_EWMA = 0.5, 0.3, 0.2
+else:
+    FLAKY_WEIGHT_WILSON = _flaky_w1 / _flaky_wsum
+    FLAKY_WEIGHT_TRANSITION = _flaky_w2 / _flaky_wsum
+    FLAKY_WEIGHT_EWMA = _flaky_w3 / _flaky_wsum
+
+FLAKY_EWMA_ALPHA = float(os.getenv('FLAKY_EWMA_ALPHA', '0.35'))
+FLAKY_EWMA_ALPHA = max(0.01, min(FLAKY_EWMA_ALPHA, 0.99))
+
+FLAKY_WILSON_Z = float(os.getenv('FLAKY_WILSON_Z', '1.96'))
+FLAKY_WILSON_Z = max(0.5, min(FLAKY_WILSON_Z, 5.0))
+
+FLAKY_RECENT_WINDOW = int(os.getenv('FLAKY_RECENT_WINDOW', '30'))
+FLAKY_RECENT_WINDOW = max(5, min(FLAKY_RECENT_WINDOW, 200))
 
 # 邮件通知配置 (演示使用，真实环境需填入有效账号)
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
