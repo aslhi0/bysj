@@ -32,3 +32,7 @@ frontend/.vite-cache/
 node_modules/
 test-results/
 artifacts/
+# 论文第 6 章：本地批跑输出（勿提交大 CSV/图）
+data/thesis_*.csv
+docs/images/fig6-*.png
+**/thesis_runs.csv

@@ -135,6 +135,17 @@ d:\test\venv\Scripts\python.exe seed_demo_data.py
 
 - `GET /api/task-status/{task_id}/`
 
+### 7.5 论文策略对照实验脚本
+
+在平台已启动、已具备测试用户与三类用例 ID 的前提下，可用根目录脚本批量执行并导出 CSV，供第 6 章制表与作图：
+
+- `scripts/thesis_experiment.py`：`summary` / `summary-json`（写入 JSON 归档）拉取 `experiment_summary`；`run-series` 对 `run` / `run_smart` 重复触发并轮询 `task_status`，支持 `--label` 写入 CSV 的 `case_label` 列。
+- `scripts/plot_thesis_ch6_figures.py`：从 CSV 生成图 6-1～6-3 用的 PNG（需 `matplotlib pandas`）。
+- `docs/images/gen_thesis_ch5_flow_figures.py`：生成第 5 章**图 5-1、图 5-2** 静态 PNG（供 Word 插入，不依赖 Mermaid 渲染）。
+- `seed_demo_data.py` 重建数据时会多建 3 条以 `[论文]` 开头的策略实验用例（稳定 HTTP / 波动 UI / 高风险 HTTP），见脚本内 `build_thesis_experiment_cases()`。
+
+环境变量：`THESIS_API_BASE`、`THESIS_USERNAME`、`THESIS_PASSWORD`。详见脚本内 docstring。
+
 ## 8. 质量检查
 
 ```powershell

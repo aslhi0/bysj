@@ -295,6 +295,71 @@ def build_api_perf_cases():
     ]
 
 
+def build_thesis_experiment_cases():
+    """
+    论文第 6 章「稳定 / 波动 / 高风险」推荐用例（与 Demo-HTTP-API-Perf 或 SauceDemo 环境配合）：
+    - 稳定型：对 Postman Echo 的单步 GET，网络正常时历史成功率应接近 100%；
+    - 波动型：SauceDemo 登录链上首屏 `wait_visible` 超时 2s，易因网络/渲染波动；
+    - 高风险：单响应多路 JSON 断言 + 双步链（与 AP3/链路类似），任一步失败即计失败，易抬高失败分窗口。
+    """
+    vsteps = [
+        _ui("open", url="{{base_url}}", timeout=60),
+        _ui("wait_visible", by="id", selector="user-name", timeout=2),
+        _ui("input", by="id", selector="user-name", text="{{username}}"),
+        _ui("input", by="id", selector="password", text="{{password}}"),
+        _ui("click", by="id", selector="login-button"),
+        _ui("wait_visible", by="css", selector=".inventory_list", timeout=20),
+    ]
+    volatile_ui = _case(
+        "[论文] 波动型-UI 首屏窄超时",
+        ["论文", "波动型", "Flaky 策略实验"],
+        vsteps,
+        variables={"username": "standard_user", "password": "secret_sauce"},
+    )
+    return [
+        _case(
+            "[论文] 稳定型-HTTP GET Echo",
+            ["论文", "稳定型", "Flaky 策略实验"],
+            [
+                _http(
+                    "GET",
+                    "/get?thesis_stable=1",
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "args.thesis_stable", "expected": "1"},
+                    ],
+                )
+            ],
+        ),
+        volatile_ui,
+        _case(
+            "[论文] 高风险-HTTP 链路与多断言",
+            ["论文", "高风险", "Flaky 策略实验"],
+            [
+                _http(
+                    "GET",
+                    "/get?strict_token={{strict_token}}&extra=ok",
+                    capture={"tok": {"from": "json", "path": "args.strict_token"}},
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "args.strict_token", "expected": "{{strict_token}}"},
+                        {"source": "json", "operator": "eq", "path": "args.extra", "expected": "ok"},
+                    ],
+                ),
+                _http(
+                    "GET",
+                    "/get?echo_tok={{tok}}",
+                    assertions=[
+                        {"source": "status_code", "operator": "eq", "expected": "200"},
+                        {"source": "json", "operator": "eq", "path": "args.echo_tok", "expected": "{{strict_token}}"},
+                    ],
+                ),
+            ],
+            variables={"strict_token": "T_HR_THESIS_01"},
+        ),
+    ]
+
+
 def reset_primary_key_sequences():
     """
     在清空测试业务表后重置自增主键序列。
@@ -514,6 +579,39 @@ def reset_and_seed():
         ordered_case_ids=api_regression_ids,
     )
 
+    for item in build_thesis_experiment_cases():
+        proj = project if "波动型" in item["title"] else api_project
+        tcase = TestCase.objects.create(
+            project=proj,
+            title=item["title"],
+            tags=item["tags"],
+            status=item["status"],
+            variables=item["variables"],
+            steps=item["steps"],
+        )
+        TestCaseVersion.objects.create(
+            case=tcase,
+            version=1,
+            snapshot={
+                "project": tcase.project_id,
+                "title": tcase.title,
+                "steps": tcase.steps,
+                "variables": tcase.variables,
+                "tags": tcase.tags,
+                "setup_sql": tcase.setup_sql,
+                "teardown_sql": tcase.teardown_sql,
+                "status": tcase.status,
+                "updated_at": str(tcase.updated_at),
+            },
+            created_by=demo_user,
+        )
+        cases.append(tcase)
+        if proj == api_project:
+            api_cases.append(tcase)
+        else:
+            ui_cases.append(tcase)
+        print(f"  + 论文用例: {tcase.title} （项目：{proj.name}）")
+
     perf_dir = os.path.join(BACKEND_DIR, "media", "perf")
     if os.path.isdir(perf_dir):
         shutil.rmtree(perf_dir, ignore_errors=True)
@@ -528,6 +626,8 @@ def reset_and_seed():
     print(f"- 环境2：{api_env.name} ({api_env.base_url})")
     print(f"- 用例总数：{len(cases)}（UI: {len(ui_cases)}，HTTP: {len(api_cases)}）")
     print("- 套件总数：8（UI 4 + HTTP 4）")
+    print("- 论文第 6 章：已注入 3 条标题以 [论文] 开头、标签含「Flaky 策略实验」的用例；")
+    print("  稳定/高风险属 Demo-HTTP-API-Perf + Postman Echo；波动型属 Demo-SauceDemo + 公网 UI。")
 
 
 if __name__ == "__main__":
