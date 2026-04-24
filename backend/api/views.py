@@ -33,6 +33,9 @@ def _sanitize_task_result(result_payload):
         "elapsed_time",
         "summary",
         "message",
+        "attempts",
+        "attempts_made",
+        "retries_used",
     }
     sanitized = {k: v for k, v in result_payload.items() if k in allowed_keys}
     if "status" not in sanitized:

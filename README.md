@@ -140,7 +140,10 @@ d:\test\venv\Scripts\python.exe seed_demo_data.py
 在平台已启动、已具备测试用户与三类用例 ID 的前提下，可用根目录脚本批量执行并导出 CSV，供第 6 章制表与作图：
 
 - `scripts/thesis_experiment.py`：`summary` / `summary-json`（写入 JSON 归档）拉取 `experiment_summary`；`run-series` 对 `run` / `run_smart` 重复触发并轮询 `task_status`，支持 `--label` 写入 CSV 的 `case_label` 列。
-- `scripts/plot_thesis_ch6_figures.py`：从 CSV 生成图 6-1～6-3 用的 PNG（需 `matplotlib pandas`）。
+- `scripts/thesis_runs_stats.py`：对 `run-series` 产出的 CSV 按用例/策略汇总观测成功率、标准误、耗时的均值与标准差，便于填论文表 6-3（需 `pandas`）。
+- `scripts/enrich_thesis_csv_flaky_score.py`：根据 `experiment_summary_case*.json` 为每行 `case_id` 写入 `flaky_score`，便于图 6-3 与重跑作图（需 `pandas`）。
+- `scripts/plot_thesis_ch6_figures.py`：从 CSV 生成图 6-1～6-3 用的 PNG（需 `matplotlib pandas`）；`--flaky-json-dir` 可免先生成 enriched 文件；`--fig6-3-combined-also` 另出跨用例 `fig6-3_flaky_gain_combined.png`。
+- `docs/artifacts/`：一次跑通的归档（`thesis_runs_20260424.csv`、`experiment_summary_case*.json` 等）与第 6 章表/图可对照。第 6 章插图默认输出在 **`docs/images/`**（如 `fig6-1_success_rates.png` 由脚本在无 `--case-label` 时**自动按 `case_label=稳定型-HTTP` 子集**绘制；另可 `--case-label` 出 `fig6-1_波动型-UI.png` 等）；根目录 `data/thesis_runs.csv` 默认在 `.gitignore` 中。
 - `docs/images/gen_thesis_ch5_flow_figures.py`：生成第 5 章**图 5-1、图 5-2** 静态 PNG（供 Word 插入，不依赖 Mermaid 渲染）。
 - `seed_demo_data.py` 重建数据时会多建 3 条以 `[论文]` 开头的策略实验用例（稳定 HTTP / 波动 UI / 高风险 HTTP），见脚本内 `build_thesis_experiment_cases()`。
 

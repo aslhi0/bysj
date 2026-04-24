@@ -6,25 +6,98 @@
 依赖：pip install matplotlib pandas
 
 示例：
-  python scripts/plot_thesis_ch6_figures.py --csv runs.csv --out-dir docs/images/
-  python scripts/plot_thesis_ch6_figures.py --csv runs.csv --case-label 稳定型-A --out-dir docs/images/
+  python scripts/enrich_thesis_csv_flaky_score.py runs.csv out.csv --json-dir docs/artifacts
+  python scripts/plot_thesis_ch6_figures.py --csv out.csv --out-dir docs/images/ --flaky-json-dir docs/artifacts --fig6-3-combined-also
+  # 无 --case-label 时：fig6-1/6-2/6-3 主文件名默认按 case_label=稳定型-HTTP 子集，避免多 case 混图
+  python scripts/plot_thesis_ch6_figures.py --csv out.csv --case-label 波动型-UI --out-dir docs/images/ --flaky-json-dir docs/artifacts
 
-CSV 列须含：case_id 或 case_label（可选）、mode、retry_times（run 模式）、success、elapsed_sec。
-按 (case_id, 策略) 分组聚合：策略由 mode + retry_times 推导（run_smart 记为 adaptive）。
+CSV 列须含：case_id 或 case_label（可选）、mode、retry_times（run 模式）、success、elapsed_sec；图 6-3 另需 flaky_score 列或 --flaky-json-dir。
+按 (case_id, 策略) 分组聚合：策略由 mode + retry_times 推导（run_smart 记为 run_smart）。
 """
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import os
+import platform
 import sys
 
 try:
-    import pandas as pd
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
     import numpy as np
+    import pandas as pd
 except ImportError:
     print("需要: pip install matplotlib pandas", file=sys.stderr)
     raise
+
+
+def configure_matplotlib_chinese() -> None:
+    """注册常见中文字体并设置回退，避免中文标题/轴标签显示为方框。Windows 下优先使用微软雅黑/黑体。"""
+    if platform.system() == "Windows":
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        for name in (
+            "msyh.ttc",  # 微软雅黑
+            "msyhbd.ttc",
+            "simhei.ttf",  # 黑体
+            "simsun.ttc",  # 宋体
+        ):
+            path = os.path.join(windir, "Fonts", name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                font_manager.fontManager.addfont(path)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            try:
+                prop = font_manager.FontProperties(fname=path)
+                fam = prop.get_name()
+                plt.rcParams["font.sans-serif"] = [
+                    fam,
+                    "Microsoft YaHei",
+                    "SimHei",
+                    "SimSun",
+                    "KaiTi",
+                ]
+                plt.rcParams["font.family"] = "sans-serif"
+                plt.rcParams["axes.unicode_minus"] = False
+                return
+            except Exception:
+                continue
+    # 非 Windows 或注册失败：使用名称回退
+    plt.rcParams["font.sans-serif"] = [
+        "Microsoft YaHei",
+        "SimHei",
+        "WenQuanYi Micro Hei",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "Arial Unicode MS",
+        "sans-serif",
+    ]
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+configure_matplotlib_chinese()
+
+
+def _fig6_filenames(case_key: str | None) -> tuple[str, str, str]:
+    """无筛选时用正文默认主图名；有 `--case-label` / `--case-id` 时在文件名中带区分片段。"""
+    if case_key is None:
+        return (
+            "fig6-1_success_rates.png",
+            "fig6-2_mean_elapsed.png",
+            "fig6-3_flaky_gain.png",
+        )
+    tag = str(case_key)
+    return (
+        f"fig6-1_{tag}.png",
+        f"fig6-2_{tag}.png",
+        f"fig6-3_flaky_gain_{tag}.png",
+    )
 
 
 def _strategy_name(row) -> str:
@@ -41,13 +114,84 @@ def _strategy_name(row) -> str:
     return f"r={r}"
 
 
-def load_df(path: str) -> "pd.DataFrame":
+def _load_flaky_map(json_dir: str) -> dict[int, float]:
+    m: dict[int, float] = {}
+    pattern = os.path.join(json_dir, "experiment_summary_case*.json")
+    for path in sorted(glob.glob(pattern)):
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        cid = d.get("case_id")
+        fa = d.get("flaky_analysis") or {}
+        fs = fa.get("flaky_score")
+        if cid is not None and fs is not None:
+            m[int(cid)] = float(fs)
+    return m
+
+
+def load_df(path: str, *, flaky_json_dir: str | None = None) -> "pd.DataFrame":
     df = pd.read_csv(path)
     if "case_label" not in df.columns:
         df["case_label"] = ""
     if "strategy" not in df.columns:
         df["strategy"] = df.apply(_strategy_name, axis=1)
+    if flaky_json_dir and (flaky_json_dir.strip() if isinstance(flaky_json_dir, str) else True):
+        mp = _load_flaky_map(flaky_json_dir)
+        if mp:
+            df["flaky_score"] = df["case_id"].map(lambda x: mp.get(int(x)))
     return df
+
+
+def plot_fig6_3_combined(df: "pd.DataFrame", out_dir: str) -> None:
+    """跨 case_id：每点 = (flaky_score, 同用例下相对 r=0 的观测成功率提升)，策略为除 r=0 外各策略。"""
+    os.makedirs(out_dir, exist_ok=True)
+    if "flaky_score" not in df.columns or df["flaky_score"].isna().all():
+        print("提示：无 flaky_score，图 6-3（合并）跳过。使用 --flaky-json-dir 或 enrich_thesis_csv_flaky_score.py。")
+        return
+    if "case_id" not in df.columns:
+        print("提示：CSV 无 case_id，图 6-3（合并）跳过。")
+        return
+    fig, ax = plt.subplots(figsize=(8, 5))
+    case_ids = sorted(int(x) for x in df["case_id"].dropna().unique())
+    markers = ["o", "s", "^", "D", "v", "P"]
+    for j, cid in enumerate(case_ids):
+        sub = df[df["case_id"] == cid]
+        if sub.empty:
+            continue
+        fs = float(sub["flaky_score"].dropna().iloc[0]) if sub["flaky_score"].notna().any() else float("nan")
+        if pd.isna(fs):
+            continue
+        base_mask = sub["strategy"].str.match(r"^r=0$", na=False)
+        base = float(sub.loc[base_mask, "success"].mean()) if base_mask.any() else float("nan")
+        k = 0
+        for s in sub["strategy"].unique():
+            if s == "r=0":
+                continue
+            chunk = sub[sub["strategy"] == s]
+            if chunk.empty:
+                continue
+            ms = float(chunk["success"].mean())
+            delta = ms - base if pd.notna(base) else 0.0
+            mk = markers[k % len(markers)]
+            k += 1
+            ax.scatter(
+                [fs],
+                [delta],
+                s=80,
+                marker=mk,
+                alpha=0.85,
+                label=f"case {cid} {s}",
+            )
+            ax.annotate(f"{cid}:{s}", (fs, delta), textcoords="offset points", xytext=(5, 4), fontsize=7)
+    ax.axhline(0, color="gray", linewidth=0.8)
+    ax.set_xlabel("flaky_score")
+    ax.set_ylabel("相对 r=0 的观测成功率提升（同用例）")
+    ax.set_title("图 6-3 各用例：flaky_score 与策略收益（合并）")
+    ax.legend(loc="best", fontsize=7)
+    fig.tight_layout()
+    p3 = os.path.join(out_dir, "fig6-3_flaky_gain_combined.png")
+    fig.savefig(p3, dpi=150)
+    plt.close(fig)
+    print("已写入", p3)
 
 
 def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None:
@@ -57,7 +201,11 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
     elif case_key is not None:
         sub = df[df["case_id"].astype(str) == str(case_key)]
     else:
-        sub = df
+        # 无 --case-id / --case-label 时：与论文 6.4.6「主文默认稳定型-HTTP 子集」一致，避免多 case 混在一张柱图里
+        if "case_label" in df.columns and (df["case_label"] == "稳定型-HTTP").any():
+            sub = df[df["case_label"] == "稳定型-HTTP"]
+        else:
+            sub = df
     if sub.empty:
         raise SystemExit("筛选后无数据，请检查 --case-label 或 CSV")
 
@@ -69,6 +217,8 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
     strategies = list(mean_succ.index)
     x = np.arange(len(strategies))
 
+    fn1, fn2, fn3 = _fig6_filenames(case_key)
+
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.bar(x, mean_succ.values, yerr=std_succ.values, capsize=4, color="steelblue", ecolor="gray", alpha=0.9)
     ax.set_xticks(x)
@@ -77,7 +227,7 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
     ax.set_title("图 6-1 各策略观测成功率（均值±标准差）")
     ax.set_ylim(0, 1.05)
     fig.tight_layout()
-    p1 = os.path.join(out_dir, "fig6-1_success_rates.png")
+    p1 = os.path.join(out_dir, fn1)
     fig.savefig(p1, dpi=150)
     plt.close(fig)
     print("已写入", p1)
@@ -89,7 +239,7 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
     ax.set_ylabel("平均 wall-clock 耗时 (s)")
     ax.set_title("图 6-2 各策略平均耗时")
     fig.tight_layout()
-    p2 = os.path.join(out_dir, "fig6-2_mean_elapsed.png")
+    p2 = os.path.join(out_dir, fn2)
     fig.savefig(p2, dpi=150)
     plt.close(fig)
     print("已写入", p2)
@@ -125,7 +275,7 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
     ax.set_ylabel("相对 r=0 的观测成功率提升")
     ax.set_title("图 6-3 flaky_score 与 run_smart/固定重试之收益")
     fig.tight_layout()
-    p3 = os.path.join(out_dir, "fig6-3_flaky_gain.png")
+    p3 = os.path.join(out_dir, fn3)
     fig.savefig(p3, dpi=150)
     plt.close(fig)
     print("已写入", p3)
@@ -137,14 +287,34 @@ def main() -> None:
     ap.add_argument("--out-dir", default="docs/images", help="PNG 输出目录")
     ap.add_argument("--case-label", default=None, help="仅绘制某一类用例（需 CSV 有 case_label 或 case_id）")
     ap.add_argument("--case-id", default=None, help="仅绘制指定 case_id")
+    ap.add_argument(
+        "--flaky-json-dir",
+        default=None,
+        help="含 experiment_summary_case*.json 时，为每行注入 flaky_score（可不先手工改 CSV）",
+    )
+    ap.add_argument(
+        "--fig6-3-combined-only",
+        action="store_true",
+        help="仅生成跨 case 的图 6-3（fig6-3_flaky_gain_combined.png），不画 6-1/6-2",
+    )
+    ap.add_argument(
+        "--fig6-3-combined-also",
+        action="store_true",
+        help="在常规出图后额外写一张跨 case 的 fig6-3",
+    )
     args = ap.parse_args()
-    df = load_df(args.csv)
+    df = load_df(args.csv, flaky_json_dir=args.flaky_json_dir)
+    if args.fig6_3_combined_only:
+        plot_fig6_3_combined(df, args.out_dir)
+        return
     key = None
     if args.case_label:
         key = args.case_label
     elif args.case_id:
         key = args.case_id
     plot_figures(df, key, args.out_dir)
+    if args.fig6_3_combined_also:
+        plot_fig6_3_combined(df, args.out_dir)
 
 
 if __name__ == "__main__":

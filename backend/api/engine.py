@@ -555,7 +555,23 @@ class TestEngine:
             by = by_map.get(by_key, By.CSS_SELECTOR)
             if action == 'open':
                 if isinstance(url, str) and (url.startswith('http://') or url.startswith('https://')):
-                    validate_outbound_http_url(url)
+                    # 与 run_http 一致：与项目环境 base_url 同主机时视为受信，仅比对 host，避免公网页
+                    # 在部分网络下 DNS 解析结果被误判而拦死 open。
+                    bu = self.variables.get('base_url') or self.variables.get('base')
+                    allowed_h = None
+                    if isinstance(bu, str) and bu.strip():
+                        try:
+                            allowed_h = urlparse(bu).hostname
+                        except Exception:
+                            allowed_h = None
+                    try:
+                        url_h = urlparse(url).hostname
+                    except Exception:
+                        url_h = None
+                    if allowed_h and url_h and allowed_h.lower() == url_h.lower():
+                        validate_outbound_http_url(url, allowed_hosts=[allowed_h])
+                    else:
+                        validate_outbound_http_url(url)
                 self.driver.get(url)
             elif action == 'click':
                 el = WebDriverWait(self.driver, timeout).until(

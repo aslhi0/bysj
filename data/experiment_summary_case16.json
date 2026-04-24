@@ -1,0 +1,114 @@
+{
+  "case_id": 16,
+  "case_title": "[论文] 波动型-UI 首屏窄超时",
+  "execution_stats": {
+    "window_cap": 30,
+    "sample_size": 30,
+    "success": 30,
+    "failed": 0,
+    "error": 0,
+    "other": 0,
+    "empirical_failure_rate": 0.0,
+    "avg_elapsed_seconds": 1.6021,
+    "min_elapsed_seconds": 1.4657,
+    "max_elapsed_seconds": 1.8604
+  },
+  "flaky_analysis": {
+    "sample_size": 30,
+    "flaky_score": 6,
+    "risk_level": "low",
+    "failure_rate": 0.0,
+    "ewma_failure": 0.0,
+    "transition_rate": 0.0,
+    "wilson_failure_upper": 0.1135,
+    "suggested_retries": 1,
+    "suggested_attempts": 2,
+    "projections": [
+      {
+        "attempts": 1,
+        "projected_success": 0.8865
+      },
+      {
+        "attempts": 2,
+        "projected_success": 0.9871
+      },
+      {
+        "attempts": 3,
+        "projected_success": 0.9985
+      }
+    ],
+    "message": "分值越高表示该用例近期越不稳定；建议按预测成功率动态设置重试次数。",
+    "confidence_level": "high",
+    "meta": {
+      "target_success": 0.95,
+      "max_attempts": 3,
+      "weights_effective": {
+        "wilson": 0.5,
+        "transition": 0.3,
+        "ewma": 0.2
+      }
+    },
+    "methodology": {
+      "version": "1.1",
+      "recent_window": 30,
+      "weights": {
+        "wilson_failure_upper": 0.5,
+        "transition_rate": 0.3,
+        "ewma_failure": 0.2
+      },
+      "ewma_alpha": 0.35,
+      "wilson_z": 1.96,
+      "assumptions": [
+        "将窗口内每次执行视为同分布伯努利试验的样本；失败率用 Wilson 区间上界以控制小样本乐观偏差。",
+        "至少一次成功概率的投影使用 P(至少一次成功) ≈ 1 - p^k，其中 p 为 Wilson 失败率上界、k 为连续独立尝试次数；各次尝试独立、同分布。"
+      ],
+      "limitations": [
+        "未显式建模失败之间的相关性（例如基础设施连片故障、共享资源争用）。",
+        "强顺序漂移或样本非平稳时，EWMA 与切换率可能放大短期波动；宜结合更大窗口或分段分析。"
+      ]
+    }
+  },
+  "strategy_comparison": [
+    {
+      "kind": "fixed",
+      "label": "固定策略：retry_times=0（等价单次 run 指定重试）",
+      "retry_times": 0,
+      "max_attempts": 1,
+      "projected_at_least_one_success": 0.8865
+    },
+    {
+      "kind": "fixed",
+      "label": "固定策略：retry_times=1（等价单次 run 指定重试）",
+      "retry_times": 1,
+      "max_attempts": 2,
+      "projected_at_least_one_success": 0.9871
+    },
+    {
+      "kind": "fixed",
+      "label": "固定策略：retry_times=2（等价单次 run 指定重试）",
+      "retry_times": 2,
+      "max_attempts": 3,
+      "projected_at_least_one_success": 0.9985
+    },
+    {
+      "kind": "fixed",
+      "label": "固定策略：retry_times=3（等价单次 run 指定重试）",
+      "retry_times": 3,
+      "max_attempts": 4,
+      "projected_at_least_one_success": null
+    },
+    {
+      "kind": "adaptive",
+      "label": "自适应策略：run_smart 当前建议",
+      "retry_times": 1,
+      "max_attempts": 2,
+      "projected_at_least_one_success": 0.9871,
+      "flaky_score": 6,
+      "risk_level": "low"
+    }
+  ],
+  "notes": {
+    "fixed_rows": "retry_times 0~3 对应 POST /cases/{id}/run/ 的手动重试上限；投影基于 Wilson 失败率上界与独立尝试假设。",
+    "adaptive_row": "与 POST /cases/{id}/run_smart/ 使用的建议一致；请在相同 target_success/max_attempts 下对比。"
+  }
+}
