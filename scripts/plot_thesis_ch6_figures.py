@@ -20,7 +20,6 @@ import argparse
 import glob
 import json
 import os
-import platform
 import sys
 
 try:
@@ -36,52 +35,10 @@ except ImportError:
     raise
 
 
-def configure_matplotlib_chinese() -> None:
-    """注册常见中文字体并设置回退，避免中文标题/轴标签显示为方框。Windows 下优先使用微软雅黑/黑体。"""
-    if platform.system() == "Windows":
-        windir = os.environ.get("WINDIR", r"C:\Windows")
-        for name in (
-            "msyh.ttc",  # 微软雅黑
-            "msyhbd.ttc",
-            "simhei.ttf",  # 黑体
-            "simsun.ttc",  # 宋体
-        ):
-            path = os.path.join(windir, "Fonts", name)
-            if not os.path.isfile(path):
-                continue
-            try:
-                font_manager.fontManager.addfont(path)
-            except (OSError, ValueError, RuntimeError):
-                continue
-            try:
-                prop = font_manager.FontProperties(fname=path)
-                fam = prop.get_name()
-                plt.rcParams["font.sans-serif"] = [
-                    fam,
-                    "Microsoft YaHei",
-                    "SimHei",
-                    "SimSun",
-                    "KaiTi",
-                ]
-                plt.rcParams["font.family"] = "sans-serif"
-                plt.rcParams["axes.unicode_minus"] = False
-                return
-            except Exception:
-                continue
-    # 非 Windows 或注册失败：使用名称回退
-    plt.rcParams["font.sans-serif"] = [
-        "Microsoft YaHei",
-        "SimHei",
-        "WenQuanYi Micro Hei",
-        "Noto Sans CJK SC",
-        "Source Han Sans SC",
-        "Arial Unicode MS",
-        "sans-serif",
-    ]
-    plt.rcParams["axes.unicode_minus"] = False
+from figure_fonts import configure_matplotlib_chinese
 
 
-configure_matplotlib_chinese()
+configure_matplotlib_chinese(plt, font_manager)
 
 
 def _fig6_filenames(case_key: str | None) -> tuple[str, str, str]:
@@ -112,6 +69,33 @@ def _strategy_name(row) -> str:
     except (TypeError, ValueError):
         r = 0
     return f"r={r}"
+
+
+def _annotation_offset(index: int) -> tuple[int, int]:
+    offsets = [(6, 8), (6, -14), (-44, 8), (-44, -14), (10, 20), (-56, 20)]
+    return offsets[index % len(offsets)]
+
+
+def _case_title(df: "pd.DataFrame", fallback: str | None = None) -> str:
+    if fallback:
+        return fallback
+    if "case_label" in df.columns:
+        labels = [str(x) for x in df["case_label"].dropna().unique() if str(x).strip()]
+        if len(labels) == 1:
+            return labels[0]
+    if "case_id" in df.columns:
+        ids = [str(int(x)) for x in df["case_id"].dropna().unique()]
+        if len(ids) == 1:
+            return f"case_id={ids[0]}"
+    return "稳定型-HTTP"
+
+
+def _ordered_strategies(strategies) -> list[str]:
+    preferred = ["r=0", "r=1", "r=2", "r=3", "run_smart"]
+    observed = [str(s) for s in strategies]
+    ordered = [s for s in preferred if s in observed]
+    ordered.extend(sorted(s for s in observed if s not in ordered))
+    return ordered
 
 
 def _load_flaky_map(json_dir: str) -> dict[int, float]:
@@ -153,6 +137,7 @@ def plot_fig6_3_combined(df: "pd.DataFrame", out_dir: str) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     case_ids = sorted(int(x) for x in df["case_id"].dropna().unique())
     markers = ["o", "s", "^", "D", "v", "P"]
+    label_index = 0
     for j, cid in enumerate(case_ids):
         sub = df[df["case_id"] == cid]
         if sub.empty:
@@ -179,17 +164,36 @@ def plot_fig6_3_combined(df: "pd.DataFrame", out_dir: str) -> None:
                 s=80,
                 marker=mk,
                 alpha=0.85,
-                label=f"case {cid} {s}",
+                label=f"用例 {cid} {s}",
             )
-            ax.annotate(f"{cid}:{s}", (fs, delta), textcoords="offset points", xytext=(5, 4), fontsize=7)
+            ax.annotate(
+                f"{cid}:{s}",
+                (fs, delta),
+                textcoords="offset points",
+                xytext=_annotation_offset(label_index),
+                fontsize=7,
+                arrowprops={"arrowstyle": "-", "color": "#999999", "linewidth": 0.5},
+            )
+            label_index += 1
     ax.axhline(0, color="gray", linewidth=0.8)
     ax.set_xlabel("flaky_score")
     ax.set_ylabel("相对 r=0 的观测成功率提升（同用例）")
     ax.set_title("图 6-3 各用例：flaky_score 与策略收益（合并）")
-    ax.legend(loc="best", fontsize=7)
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.3)
+    ax.text(
+        0.01,
+        0.98,
+        "注：点坐标为真实统计值；本批各策略观测成功率均为 1.000，故收益点重合在 0。",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8,
+        color="#555555",
+    )
+    ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
     p3 = os.path.join(out_dir, "fig6-3_flaky_gain_combined.png")
-    fig.savefig(p3, dpi=150)
+    fig.savefig(p3, dpi=220)
     plt.close(fig)
     print("已写入", p3)
 
@@ -208,39 +212,90 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
             sub = df
     if sub.empty:
         raise SystemExit("筛选后无数据，请检查 --case-label 或 CSV")
-
+    title_case = _case_title(sub, case_key)
     g = sub.groupby("strategy", dropna=False)
+    count = g["success"].count()
     mean_succ = g["success"].mean()
-    std_succ = g["success"].std().fillna(0)
+    se_succ = np.sqrt(mean_succ * (1 - mean_succ) / count).fillna(0)
     mean_time = g["elapsed_sec"].mean()
+    std_time = g["elapsed_sec"].std().fillna(0)
 
-    strategies = list(mean_succ.index)
+    strategies = _ordered_strategies(mean_succ.index)
+    count = count.reindex(strategies)
+    mean_succ = mean_succ.reindex(strategies)
+    se_succ = se_succ.reindex(strategies)
+    mean_time = mean_time.reindex(strategies)
+    std_time = std_time.reindex(strategies)
     x = np.arange(len(strategies))
-
     fn1, fn2, fn3 = _fig6_filenames(case_key)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.bar(x, mean_succ.values, yerr=std_succ.values, capsize=4, color="steelblue", ecolor="gray", alpha=0.9)
+    bars = ax.bar(
+        x,
+        mean_succ.values,
+        yerr=se_succ.values,
+        capsize=4,
+        color="#4E79A7",
+        ecolor="#555555",
+        alpha=0.92,
+        linewidth=0.8,
+        edgecolor="#2F4F6F",
+    )
     ax.set_xticks(x)
     ax.set_xticklabels(strategies, rotation=15, ha="right")
-    ax.set_ylabel("观测成功率")
-    ax.set_title("图 6-1 各策略观测成功率（均值±标准差）")
+    ax.set_ylabel("观测成功率 p_hat")
+    ax.set_title(f"图 6-1 {title_case}：各策略观测成功率（p_hat±SE）")
     ax.set_ylim(0, 1.05)
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
+    for bar, p_hat, se, n in zip(bars, mean_succ.values, se_succ.values, count.values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            max(bar.get_height() - 0.035, 0.04),
+            f"{p_hat:.3f}\nSE={se:.3f}\nN={int(n)}",
+            ha="center",
+            va="top" if bar.get_height() > 0.15 else "bottom",
+            fontsize=8,
+            color="white" if bar.get_height() > 0.15 else "#222222",
+            fontweight="bold",
+        )
     fig.tight_layout()
     p1 = os.path.join(out_dir, fn1)
-    fig.savefig(p1, dpi=150)
+    fig.savefig(p1, dpi=220)
     plt.close(fig)
     print("已写入", p1)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.bar(x, mean_time.values, color="coral", alpha=0.9)
+    bars = ax.bar(
+        x,
+        mean_time.values,
+        yerr=std_time.values,
+        capsize=4,
+        color="#F28E2B",
+        ecolor="#555555",
+        alpha=0.92,
+        linewidth=0.8,
+        edgecolor="#9B5418",
+    )
     ax.set_xticks(x)
     ax.set_xticklabels(strategies, rotation=15, ha="right")
-    ax.set_ylabel("平均 wall-clock 耗时 (s)")
-    ax.set_title("图 6-2 各策略平均耗时")
+    ax.set_ylabel("wall-clock 耗时 (s)")
+    ax.set_title(f"图 6-2 {title_case}：各策略平均耗时（mean±std）")
+    ax.grid(axis="y", linestyle="--", linewidth=0.6, alpha=0.35)
+    top = float((mean_time + std_time).max()) if len(mean_time) else 0
+    ax.set_ylim(0, max(top * 1.22, 0.1))
+    for bar, avg, std, n in zip(bars, mean_time.values, std_time.values, count.values):
+        ax.annotate(
+            f"{avg:.3f}s\n±{std:.3f}\nN={int(n)}",
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            textcoords="offset points",
+            xytext=(0, 6),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
     fig.tight_layout()
     p2 = os.path.join(out_dir, fn2)
-    fig.savefig(p2, dpi=150)
+    fig.savefig(p2, dpi=220)
     plt.close(fig)
     print("已写入", p2)
 
@@ -268,15 +323,33 @@ def plot_figures(df: "pd.DataFrame", case_key: str | None, out_dir: str) -> None
         return
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.scatter(xs, ys, s=60, c="green", alpha=0.7)
-    for x, y, lab in zip(xs, ys, labels):
-        ax.annotate(lab, (x, y), textcoords="offset points", xytext=(4, 4), fontsize=8)
+    for idx, (x, y, lab) in enumerate(zip(xs, ys, labels)):
+        ax.annotate(
+            lab,
+            (x, y),
+            textcoords="offset points",
+            xytext=_annotation_offset(idx),
+            fontsize=8,
+            arrowprops={"arrowstyle": "-", "color": "#999999", "linewidth": 0.5},
+        )
     ax.axhline(0, color="gray", linewidth=0.8)
     ax.set_xlabel("flaky_score")
     ax.set_ylabel("相对 r=0 的观测成功率提升")
-    ax.set_title("图 6-3 flaky_score 与 run_smart/固定重试之收益")
+    ax.set_title(f"图 6-3 {title_case}：flaky_score 与策略收益")
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.3)
+    ax.text(
+        0.01,
+        0.98,
+        "注：点坐标为真实统计值；本批成功率均为 1.000，故收益为 0。",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8,
+        color="#555555",
+    )
     fig.tight_layout()
     p3 = os.path.join(out_dir, fn3)
-    fig.savefig(p3, dpi=150)
+    fig.savefig(p3, dpi=220)
     plt.close(fig)
     print("已写入", p3)
 

@@ -13,6 +13,8 @@ from urllib.parse import urlparse, urljoin
 from jsonschema import validate
 from faker import Faker
 from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -501,6 +503,109 @@ class TestEngine:
             self.add_log("--- 执行后置数据清理 ---")
             self.run_db_query(sql, execute=True)
 
+    def _build_browser_options(self, browser_name, *, browser_cfg, headless, step):
+        if browser_name == 'edge':
+            options = webdriver.EdgeOptions()
+            binary_env = os.getenv('EDGE_BIN') or os.getenv('MSEDGE_BIN')
+        else:
+            options = webdriver.ChromeOptions()
+            binary_env = os.getenv('CHROME_BIN') or os.getenv('CHROMIUM_BIN')
+
+        if headless:
+            options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        try:
+            options.set_capability('pageLoadStrategy', 'eager')
+        except Exception:
+            pass
+
+        binary_path = (
+            browser_cfg.get('binary')
+            or browser_cfg.get('binary_path')
+            or browser_cfg.get('binaryPath')
+            or binary_env
+        )
+        if isinstance(binary_path, str) and binary_path.strip():
+            options.binary_location = binary_path.strip()
+
+        win_size = browser_cfg.get('window_size') or browser_cfg.get('windowSize') or step.get('window_size')
+        if isinstance(win_size, str) and win_size.strip():
+            options.add_argument(f'--window-size={win_size.strip()}')
+        return options
+
+    def _browser_candidates(self, browser_cfg):
+        requested = browser_cfg.get('name') or browser_cfg.get('browser') or os.getenv('TEST_BROWSER', 'auto')
+        requested = str(requested or 'auto').strip().lower()
+        aliases = {
+            'chromium': 'chrome',
+            'google-chrome': 'chrome',
+            'msedge': 'edge',
+            'microsoft-edge': 'edge',
+        }
+        requested = aliases.get(requested, requested)
+        if requested == 'chrome':
+            return ['chrome']
+        if requested == 'edge':
+            return ['edge']
+        if requested not in {'auto', ''}:
+            self.add_log(f"Unknown browser setting: {requested}; using auto")
+        return ['chrome', 'edge']
+
+    def _create_webdriver(self, browser_name, options, browser_cfg):
+        if browser_name == 'edge':
+            driver_path = (
+                browser_cfg.get('driver')
+                or browser_cfg.get('driver_path')
+                or browser_cfg.get('driverPath')
+                or os.getenv('EDGEDRIVER')
+                or os.getenv('MSEDGEDRIVER')
+            )
+            if isinstance(driver_path, str) and driver_path.strip():
+                return webdriver.Edge(service=EdgeService(driver_path.strip()), options=options)
+            return webdriver.Edge(options=options)
+
+        driver_path = (
+            browser_cfg.get('driver')
+            or browser_cfg.get('driver_path')
+            or browser_cfg.get('driverPath')
+            or os.getenv('CHROMEDRIVER')
+        )
+        if isinstance(driver_path, str) and driver_path.strip():
+            return webdriver.Chrome(service=ChromeService(driver_path.strip()), options=options)
+        return webdriver.Chrome(options=options)
+
+    def _init_browser_driver(self, step, browser_cfg, headless):
+        failures = []
+        for browser_name in self._browser_candidates(browser_cfg):
+            self.add_log(f"Initializing browser: {browser_name} (headless={bool(headless)})")
+            try:
+                options = self._build_browser_options(
+                    browser_name,
+                    browser_cfg=browser_cfg,
+                    headless=headless,
+                    step=step,
+                )
+                driver = self._create_webdriver(browser_name, options, browser_cfg)
+                try:
+                    driver.set_page_load_timeout(30)
+                    driver.set_script_timeout(30)
+                except Exception:
+                    pass
+                self.add_log(f"Browser ready: {browser_name}")
+                return driver
+            except Exception as e:
+                failures.append(f"{browser_name}: {str(e)}")
+                self.add_log(f"{browser_name} initialization failed: {str(e)}")
+
+        details = " | ".join(failures) if failures else "no browser candidates"
+        raise RuntimeError(
+            "Unable to initialize Selenium browser. "
+            "Install Chrome/ChromeDriver or Edge/EdgeDriver, or set TEST_BROWSER, "
+            "CHROME_BIN/CHROMEDRIVER, EDGE_BIN/EDGEDRIVER. "
+            f"Details: {details}"
+        )
+
     def run_ui(self, step):
         action = step.get('action')
         url = self.render_string(step.get('url', ''))
@@ -516,24 +621,11 @@ class TestEngine:
                 headless = step.get('headless')
             if headless is None:
                 headless = True
-            options = webdriver.ChromeOptions()
-            if headless:
-                options.add_argument('--headless')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-dev-shm-usage')
             try:
-                options.set_capability('pageLoadStrategy', 'eager')
-            except Exception:
-                pass
-            win_size = browser_cfg.get('window_size') or browser_cfg.get('windowSize') or step.get('window_size')
-            if isinstance(win_size, str) and win_size.strip():
-                options.add_argument(f'--window-size={win_size.strip()}')
-            self.driver = webdriver.Chrome(options=options)
-            try:
-                self.driver.set_page_load_timeout(30)
-                self.driver.set_script_timeout(30)
-            except Exception:
-                pass
+                self.driver = self._init_browser_driver(step, browser_cfg, headless)
+            except Exception as e:
+                self.add_log(f"Browser initialization failed: {str(e)}")
+                return False
 
         self.add_log(f"UI 动作: {action} {url or selector or ''}")
         try:

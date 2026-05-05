@@ -1,20 +1,23 @@
 # -*- coding: utf-8 -*-
 """生成毕设用图：单张 PNG，含 (a) 系统架构 (b) 核心 E-R 示意 (c) Flaky+run_smart 流程。运行：python gen_thesis_figures.py"""
 from pathlib import Path
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+from matplotlib import font_manager
 
 OUT = Path(__file__).with_name("thesis_figures.png")
-ZH = ["Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC", "DejaVu Sans"]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from figure_fonts import configure_matplotlib_chinese  # noqa: E402
 
 
 def set_zh_font():
-    plt.rcParams["font.sans-serif"] = ZH + ["DejaVu Sans"]
-    plt.rcParams["axes.unicode_minus"] = False
+    configure_matplotlib_chinese(plt, font_manager)
 
 
 def box(ax, x, y, w, h, t, fs=8, fc="#E8F4FC", ec="#1a5f7a"):

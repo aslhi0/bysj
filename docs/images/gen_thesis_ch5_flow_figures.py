@@ -6,6 +6,7 @@
   cd docs/images && python gen_thesis_ch5_flow_figures.py
 """
 from pathlib import Path
+import sys
 
 import matplotlib
 
@@ -13,14 +14,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+from matplotlib import font_manager
 
 OUT_DIR = Path(__file__).parent
-ZH = ["Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC", "DejaVu Sans"]
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from figure_fonts import configure_matplotlib_chinese  # noqa: E402
 
 
 def set_zh_font():
-    plt.rcParams["font.sans-serif"] = ZH + ["DejaVu Sans"]
-    plt.rcParams["axes.unicode_minus"] = False
+    configure_matplotlib_chinese(plt, font_manager)
 
 
 def box(ax, x, y, w, h, t, fs=7, fc="#E3F2FD", ec="#1565C0"):

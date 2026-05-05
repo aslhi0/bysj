@@ -123,6 +123,101 @@ class TestEngineHttp(TestCase):
         self.assertEqual(res, 'Error')
 
 
+class TestEngineUiBrowserSelection(TestCase):
+    def _sleep_step(self, browser=None):
+        step = {'type': 'ui', 'action': 'sleep', 'seconds': 0}
+        if browser is not None:
+            step['browser'] = browser
+        return step
+
+    def _clean_browser_env(self, **overrides):
+        keys = [
+            'TEST_BROWSER',
+            'CHROME_BIN',
+            'CHROMIUM_BIN',
+            'CHROMEDRIVER',
+            'EDGE_BIN',
+            'MSEDGE_BIN',
+            'EDGEDRIVER',
+            'MSEDGEDRIVER',
+        ]
+        values = {key: '' for key in keys}
+        values.update(overrides)
+        return patch.dict(os.environ, values, clear=False)
+
+    def test_run_ui_uses_chrome_first_by_default(self):
+        engine = TestEngine()
+        fake_driver = MagicMock()
+        with (
+            self._clean_browser_env(TEST_BROWSER='auto'),
+            patch('api.engine.webdriver.ChromeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.EdgeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.Chrome', return_value=fake_driver) as chrome,
+            patch('api.engine.webdriver.Edge') as edge,
+        ):
+            ok = engine.run_ui(self._sleep_step())
+
+        self.assertTrue(ok)
+        chrome.assert_called_once()
+        edge.assert_not_called()
+        self.assertIs(engine.driver, fake_driver)
+        self.assertIn('Browser ready: chrome', engine.get_full_log())
+
+    def test_run_ui_auto_falls_back_to_edge_when_chrome_fails(self):
+        engine = TestEngine()
+        fake_driver = MagicMock()
+        with (
+            self._clean_browser_env(TEST_BROWSER='auto'),
+            patch('api.engine.webdriver.ChromeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.EdgeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.Chrome', side_effect=Exception('chrome missing')) as chrome,
+            patch('api.engine.webdriver.Edge', return_value=fake_driver) as edge,
+        ):
+            ok = engine.run_ui(self._sleep_step())
+
+        self.assertTrue(ok)
+        chrome.assert_called_once()
+        edge.assert_called_once()
+        self.assertIs(engine.driver, fake_driver)
+        log = engine.get_full_log()
+        self.assertIn('chrome initialization failed: chrome missing', log)
+        self.assertIn('Browser ready: edge', log)
+
+    def test_run_ui_browser_name_edge_skips_chrome(self):
+        engine = TestEngine()
+        fake_driver = MagicMock()
+        with (
+            self._clean_browser_env(TEST_BROWSER='auto'),
+            patch('api.engine.webdriver.ChromeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.EdgeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.Chrome') as chrome,
+            patch('api.engine.webdriver.Edge', return_value=fake_driver) as edge,
+        ):
+            ok = engine.run_ui(self._sleep_step(browser={'name': 'edge'}))
+
+        self.assertTrue(ok)
+        chrome.assert_not_called()
+        edge.assert_called_once()
+        self.assertIs(engine.driver, fake_driver)
+
+    def test_run_ui_returns_false_when_all_browsers_fail(self):
+        engine = TestEngine()
+        with (
+            self._clean_browser_env(TEST_BROWSER='auto'),
+            patch('api.engine.webdriver.ChromeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.EdgeOptions', return_value=MagicMock()),
+            patch('api.engine.webdriver.Chrome', side_effect=Exception('chrome missing')),
+            patch('api.engine.webdriver.Edge', side_effect=Exception('edge missing')),
+        ):
+            ok = engine.run_ui(self._sleep_step())
+
+        self.assertFalse(ok)
+        log = engine.get_full_log()
+        self.assertIn('Unable to initialize Selenium browser', log)
+        self.assertIn('chrome missing', log)
+        self.assertIn('edge missing', log)
+
+
 class TestIntegrationTasks(DjangoTestCase):
     def test_run_test_case_task_creates_record_and_renders_variables(self):
         from django.contrib.auth import get_user_model
