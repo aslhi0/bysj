@@ -145,9 +145,11 @@ d:\test\venv\Scripts\python.exe seed_demo_data.py
 - `scripts/plot_thesis_ch6_figures.py`：从 CSV 生成图 6-1～6-3 用的 PNG（需 `matplotlib pandas`）；`--flaky-json-dir` 可免先生成 enriched 文件；`--fig6-3-combined-also` 另出跨用例 `fig6-3_flaky_gain_combined.png`。
 - `docs/artifacts/`：一次跑通的归档（`thesis_runs_20260424.csv`、`experiment_summary_case*.json` 等）与第 6 章表/图可对照。第 6 章插图默认输出在 **`docs/images/`**（如 `fig6-1_success_rates.png` 由脚本在无 `--case-label` 时**自动按 `case_label=稳定型-HTTP` 子集**绘制；另可 `--case-label` 出 `fig6-1_波动型-UI.png` 等）；根目录 `data/thesis_runs.csv` 默认在 `.gitignore` 中。
 - `docs/images/gen_thesis_ch5_flow_figures.py`：生成第 5 章**图 5-1、图 5-2** 静态 PNG（供 Word 插入，不依赖 Mermaid 渲染）。
+- `docs/md_to_thesis_docx.py`：定稿时由 `毕业论文初稿.md` 生成 `毕业论文初稿.docx`（`pip install python-docx`；在 `docs/` 下运行）。
+- `docs/artifacts/README.md`：第 6 章本地大文件归档目录说明；该目录下除 README 外大文件默认不提交 Git。
 - `seed_demo_data.py` 重建数据时会多建 3 条以 `[论文]` 开头的策略实验用例（稳定 HTTP / 波动 UI / 高风险 HTTP），见脚本内 `build_thesis_experiment_cases()`。
 
-环境变量：`THESIS_API_BASE`、`THESIS_USERNAME`、`THESIS_PASSWORD`。详见脚本内 docstring。
+环境变量：`THESIS_API_BASE`、`THESIS_USERNAME`、`THESIS_PASSWORD`。论文脚本还可在独立虚拟环境安装 `pip install -r scripts/requirements-thesis.txt`（`pandas` / `matplotlib` / `python-docx`）。详见各脚本内 docstring。
 
 ## 8. 质量检查
 

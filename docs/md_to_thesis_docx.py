@@ -6,13 +6,16 @@
 ------
 - 平时：只维护「毕业论文初稿.md」，让助手改内容也只改该文件，不因此生成 docx。
 - 定稿：论文内容确认后，在 docs 目录执行
-      python _deai_thesis.py
+      python md_to_thesis_docx.py
   会读取 毕业论文初稿.md，并生成（覆盖）「毕业论文初稿.docx」。
+
+依赖：pip install python-docx
 
 本脚本不修改 md 文件；旧版会额外生成 毕业论文初稿_正文.txt 已取消，以 md + 定稿时 docx 为准。
 """
 import re
 from pathlib import Path
+
 from docx import Document
 from docx.shared import Inches, Pt
 
@@ -45,7 +48,7 @@ REPLACEMENTS = [
 ]
 
 
-def apply_deai(s: str) -> str:
+def apply_replacements(s: str) -> str:
     s = s.strip()
     for a, b in REPLACEMENTS:
         s = re.sub(a, b, s)
@@ -63,7 +66,7 @@ def strip_md(s: str) -> str:
 
 
 def main():
-    text = apply_deai(SRC.read_text(encoding="utf-8"))
+    text = apply_replacements(SRC.read_text(encoding="utf-8"))
     lines = text.splitlines()
     out: list = []
     in_code = False
@@ -95,30 +98,30 @@ def main():
         if st.startswith(">"):
             inner = st[1:].strip()
             if inner and inner != ">":
-                bq.append(apply_deai(strip_md(inner)))
+                bq.append(apply_replacements(strip_md(inner)))
             continue
         flush_bq()
         if st.startswith("#"):
-            h = apply_deai(strip_md(st.lstrip("#").strip()))
+            h = apply_replacements(strip_md(st.lstrip("#").strip()))
             out.append(h)
             continue
         if st.startswith("|") and "|-|" not in st:
             if re.match(r"^\|[-:\s|]+\|?\s*$", st):
                 continue
-            parts = [apply_deai(strip_md(p)) for p in st.split("|") if p.strip()]
+            parts = [apply_replacements(strip_md(p)) for p in st.split("|") if p.strip()]
             if parts:
                 out.append("，".join(parts))
             continue
         if re.match(r"^[-*+]\s+", st) or re.match(r"^\d+\.\s+", st):
             item = re.sub(r"^[-*+]\s+", "", re.sub(r"^\d+\.\s+", "", st))
-            out.append(apply_deai(strip_md(item)))
+            out.append(apply_replacements(strip_md(item)))
             continue
         m_img = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", st)
         if m_img:
             out.append("<<IMAGE:" + m_img.group(2).strip() + ">>")
             continue
         if st:
-            out.append(apply_deai(strip_md(st)))
+            out.append(apply_replacements(strip_md(st)))
 
     flush_bq()
     body = "\n\n".join(x for x in out if x is not None)

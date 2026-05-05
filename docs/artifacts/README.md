@@ -1,0 +1,6 @@
+# 论文第 6 章本地归档（可选）
+
+本目录用于存放**批跑生成的** CSV、以及复制自 `data/` 的 `experiment_summary_case*.json` 等，供 `enrich_thesis_csv_flaky_score.py`、`plot_thesis_ch6_figures.py` 使用。
+
+- **仓库内可追溯的小 JSON** 也可放在项目根目录 **`data/experiment_summary_case*.json`**（与 `export_experiment_summary_json.py` 导出一致）。
+- 大体积 `thesis_runs*.csv` 默认不提交 Git（见根目录 `.gitignore`）；换机复现实验请将同批文件放回此处或指向 `data/thesis_runs.csv`。
