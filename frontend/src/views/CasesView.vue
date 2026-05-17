@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, Delete, Picture, Search } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
 import { useCurrentUser } from '../auth'
@@ -163,17 +163,6 @@ function addAssertion(step) {
 function removeAssertion(step, index) {
   step.assertions.splice(index, 1)
 }
-
-// ... placeholder constants ...
-const STEPS_PLACEHOLDER = `混跑示例：HTTP → UI(Selenium) → 再 HTTP
-[
-  {"type":"http","method":"GET","url":"https://httpbin.org/uuid","capture":{"uid":{"from":"json","path":"uuid"}}},
-  {"type":"ui","action":"open","url":"https://example.com","headless":true},
-  {"type":"ui","action":"click","by":"css","selector":"a","timeout":10},
-  {"type":"ui","action":"click","by":"xpath","selector":"//a","timeout":10},
-  {"type":"http","method":"GET","url":"https://httpbin.org/get?tag={{uid}}"}
-]
-UI 支持: open, click, input, wait_visible, sleep；本地调试可把 headless 改为 false。`
 
 const VARIABLES_PLACEHOLDER = `{
   "base_url": "https://httpbin.org",
@@ -690,7 +679,7 @@ async function pollTaskStatus(taskId, title) {
         }
         await loadCases()
       }
-    } catch (e) {
+    } catch {
       clearInterval(timer)
       runLoading.value = false
     }

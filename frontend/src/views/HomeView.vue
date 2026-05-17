@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted, ref, nextTick } from 'vue'
-import { Monitor, Files, List, Collection, Check, Close } from '@element-plus/icons-vue'
+import { Monitor, Files, List, Collection } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
 
 const apiStatus = ref('加载中…')

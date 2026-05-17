@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Plus, Delete, Edit, Monitor } from '@element-plus/icons-vue'
+import { Search, Plus, Delete, Edit } from '@element-plus/icons-vue'
 import { apiFetch } from '../api'
 import { useCurrentUser } from '../auth'
 
@@ -146,7 +146,9 @@ async function removeEnv(row) {
       ElMessage.success('已删除')
       loadEnvs()
     }
-  } catch {}
+  } catch {
+    // 用户取消删除时不需要提示。
+  }
 }
 </script>
 

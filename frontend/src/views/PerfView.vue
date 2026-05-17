@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
-import { Monitor, DataLine, Loading, Download } from '@element-plus/icons-vue'
+import { DataLine, Loading, Download } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiFetch } from '../api'
 
